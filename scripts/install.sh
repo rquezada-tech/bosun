@@ -385,10 +385,11 @@ else
     warn "Check logs: journalctl -u bosun-daemon -f"
 fi
 
-# ── Step 11: Open firewall port ───────────────────────────────────────────────
-header "Step 11/11: Configuring firewall"
+# ── Step 12: Open firewall port ───────────────────────────────────────────────
+header "Step 12/12: Configuring firewall"
 
 BOSUN_PORT="${BOSUN_LISTEN_ADDR##*:}"
+WEBHOOK_PORT="${BOSUN_WEBHOOK_LISTEN##*:}"
 
 if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
     if ufw status | grep -q "$BOSUN_PORT/tcp"; then
@@ -398,9 +399,17 @@ if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
         ufw allow "$BOSUN_PORT/tcp" comment "Bosun gRPC API"
         info "Port $BOSUN_PORT/tcp opened."
     fi
+
+    if ufw status | grep -q "$WEBHOOK_PORT/tcp"; then
+        info "Firewall port $WEBHOOK_PORT/tcp is already open."
+    else
+        info "Opening firewall port $WEBHOOK_PORT/tcp..."
+        ufw allow "$WEBHOOK_PORT/tcp" comment "Bosun webhook HTTP API"
+        info "Port $WEBHOOK_PORT/tcp opened."
+    fi
 else
     info "ufw not active or not installed. Skipping firewall configuration."
-    warn "If you use a different firewall, ensure port $BOSUN_PORT/tcp is open."
+    warn "If you use a different firewall, ensure ports $BOSUN_PORT/tcp and $WEBHOOK_PORT/tcp are open."
 fi
 
 # ── Success ───────────────────────────────────────────────────────────────────

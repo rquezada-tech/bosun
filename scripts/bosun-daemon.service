@@ -13,7 +13,9 @@ ExecStart=/usr/local/bin/bosun-daemon \
     --listen 0.0.0.0:9090 \
     --data-dir /var/lib/bosun \
     --cert /etc/bosun/server.crt \
-    --key /etc/bosun/server.key
+    --key /etc/bosun/server.key \
+    --webhook-listen 0.0.0.0:9091 \
+    --webhook-secret $(cat /etc/bosun/webhook-secret)
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=bosun_daemon=info
