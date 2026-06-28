@@ -321,7 +321,7 @@ fi
 
 # Generate default admin password if not set
 if [ -z "${BOSUN_ADMIN_PASSWORD:-}" ]; then
-    BOSUN_ADMIN_PASSWORD="$(openssl rand -hex 12)"
+    BOSUN_ADMIN_PASSWORD="$(openssl rand -base64 12)"
     ADMIN_PASSWORD_GENERATED="true"
 else
     ADMIN_PASSWORD_GENERATED="false"

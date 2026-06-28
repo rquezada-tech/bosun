@@ -106,16 +106,16 @@ impl BosunClient {
         Ok(Some(creds))
     }
 
-    /// Save credentials to ~/.bosun/credentials
-    pub fn save_credentials(&self, token: &str) -> anyhow::Result<()> {
+    /// Save credentials to ~/.bosun/credentials from a login response.
+    pub fn save_credentials(&self, token: &str, username: &str, role: &str) -> anyhow::Result<()> {
         let path = Self::credentials_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let creds = Credentials {
             token: token.to_string(),
-            username: "".to_string(), // Will be filled by the login response in the CLI
-            role: "".to_string(),
+            username: username.to_string(),
+            role: role.to_string(),
         };
         let json = serde_json::to_string_pretty(&creds)?;
         std::fs::write(&path, json)?;
@@ -362,6 +362,56 @@ impl BosunClient {
             .rollback_app(request)
             .await
             .context(format!("gRPC RollbackApp failed for '{app_name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    // ── Backup & Restore ────────────────────────────────────────────
+
+    /// Create a backup of an app's volumes and configuration.
+    pub async fn create_backup(&mut self, app_name: &str) -> anyhow::Result<CreateBackupResponse> {
+        let request = self.auth_request(tonic::Request::new(CreateBackupRequest {
+            app_name: app_name.to_string(),
+        }));
+        let response = self
+            .inner
+            .create_backup(request)
+            .await
+            .context(format!("gRPC CreateBackup failed for '{app_name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// List all backups, optionally filtered by app name.
+    pub async fn list_backups(
+        &mut self,
+        app_name: Option<&str>,
+    ) -> anyhow::Result<Vec<BackupInfo>> {
+        let request = self.auth_request(tonic::Request::new(ListBackupsRequest {
+            app_name: app_name.map(|s| s.to_string()),
+        }));
+        let response = self
+            .inner
+            .list_backups(request)
+            .await
+            .context("gRPC ListBackups failed")?
+            .into_inner();
+        Ok(response.backups)
+    }
+
+    /// Restore a backup by ID.
+    pub async fn restore_backup(
+        &mut self,
+        backup_id: &str,
+    ) -> anyhow::Result<RestoreBackupResponse> {
+        let request = self.auth_request(tonic::Request::new(RestoreBackupRequest {
+            backup_id: backup_id.to_string(),
+        }));
+        let response = self
+            .inner
+            .restore_backup(request)
+            .await
+            .context(format!("gRPC RestoreBackup failed for '{backup_id}'"))?
             .into_inner();
         Ok(response)
     }

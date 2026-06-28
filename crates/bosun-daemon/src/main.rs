@@ -16,6 +16,7 @@ use tonic::transport::server::ServerTlsConfig;
 use tonic::transport::{Identity, Server};
 
 mod auth;
+mod backup;
 mod server;
 mod docker;
 mod deploy;
@@ -154,6 +155,11 @@ async fn main() -> anyhow::Result<()> {
     // Create metric collector (shares the Docker connection)
     let metrics = metrics::MetricCollector::new(docker_inner);
 
+    // Initialize backup service
+    let data_dir_path = PathBuf::from(&args.data_dir);
+    let backup_service = backup::BackupService::new(&data_dir_path, docker_arc.clone());
+    tracing::info!("Backup directory: {}", data_dir_path.join("backups").display());
+
     // Create the gRPC service (with auth)
     let proxy = match proxy::CaddyClient::new().await {
         Ok(client) => {
@@ -179,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         restart_counts,
         auth_service.clone(),
         catalog,
+        backup_service,
     );
 
     // Build the gRPC server with auth interceptor

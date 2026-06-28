@@ -136,6 +136,11 @@ service Bosun {
     rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
     rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
     rpc DeleteUser(DeleteUserRequest) returns (DeleteUserResponse);
+
+    // Backup & Restore
+    rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+    rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
+    rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
 }
 
 // --- Request / Response messages ---
@@ -199,6 +204,40 @@ message UnsetEnvRequest {
     string key = 2;
 }
 message UnsetEnvResponse {}
+
+// --- Backup messages ---
+
+message BackupInfo {
+    string id = 1;
+    string app_name = 2;
+    uint64 timestamp_unix = 3;
+    uint64 size_bytes = 4;
+}
+
+message CreateBackupRequest {
+    string app_name = 1;
+}
+
+message CreateBackupResponse {
+    BackupInfo backup = 1;
+}
+
+message ListBackupsRequest {
+    optional string app_name = 1;
+}
+
+message ListBackupsResponse {
+    repeated BackupInfo backups = 1;
+}
+
+message RestoreBackupRequest {
+    string backup_id = 1;
+}
+
+message RestoreBackupResponse {
+    string app_name = 1;
+    string status = 2;
+}
 
 // --- Template messages ---
 

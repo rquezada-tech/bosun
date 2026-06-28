@@ -26,6 +26,8 @@ pub struct BosunService {
     pub auth_service: Arc<crate::auth::AuthService>,
     /// Template catalog for one-click apps.
     pub catalog: Arc<crate::templates::Catalog>,
+    /// Backup and restore service.
+    pub backup: Arc<crate::backup::BackupService>,
 }
 
 impl BosunService {
@@ -37,6 +39,7 @@ impl BosunService {
         restart_counts: crate::health::RestartCounts,
         auth_service: Arc<crate::auth::AuthService>,
         catalog: Arc<crate::templates::Catalog>,
+        backup: crate::backup::BackupService,
     ) -> Self {
         Self {
             docker,
@@ -46,6 +49,7 @@ impl BosunService {
             restart_counts,
             auth_service,
             catalog,
+            backup: Arc::new(backup),
         }
     }
 }
@@ -602,26 +606,60 @@ impl Bosun for BosunService {
         Ok(Response::new(ListTemplatesResponse { templates }))
     }
 
-    // ── Backup & Restore (stubs) ────────────────────────────────────
+    // ── Backup & Restore ────────────────────────────────────────────
 
     async fn create_backup(
         &self,
-        _request: Request<CreateBackupRequest>,
+        request: Request<CreateBackupRequest>,
     ) -> Result<Response<CreateBackupResponse>, Status> {
-        Err(Status::unimplemented("Backup not yet implemented"))
+        let req = request.into_inner();
+        tracing::info!("create_backup called for {}", req.app_name);
+
+        let backup = self
+            .backup
+            .create_backup(&req.app_name)
+            .await
+            .map_err(|e| Status::internal(format!("Backup failed: {:#}", e)))?;
+
+        Ok(Response::new(CreateBackupResponse {
+            backup: Some(backup),
+        }))
     }
 
     async fn list_backups(
         &self,
-        _request: Request<ListBackupsRequest>,
+        request: Request<ListBackupsRequest>,
     ) -> Result<Response<ListBackupsResponse>, Status> {
-        Err(Status::unimplemented("Backup listing not yet implemented"))
+        let req = request.into_inner();
+        tracing::info!(
+            "list_backups called (app={:?})",
+            req.app_name
+        );
+
+        let backups = self
+            .backup
+            .list_backups(req.app_name.as_deref())
+            .map_err(|e| Status::internal(format!("Failed to list backups: {:#}", e)))?;
+
+        Ok(Response::new(ListBackupsResponse { backups }))
     }
 
     async fn restore_backup(
         &self,
-        _request: Request<RestoreBackupRequest>,
+        request: Request<RestoreBackupRequest>,
     ) -> Result<Response<RestoreBackupResponse>, Status> {
-        Err(Status::unimplemented("Restore not yet implemented"))
+        let req = request.into_inner();
+        tracing::info!("restore_backup called for backup_id={}", req.backup_id);
+
+        let (app_name, status) = self
+            .backup
+            .restore_backup(&req.backup_id)
+            .await
+            .map_err(|e| Status::internal(format!("Restore failed: {:#}", e)))?;
+
+        Ok(Response::new(RestoreBackupResponse {
+            app_name,
+            status,
+        }))
     }
 }

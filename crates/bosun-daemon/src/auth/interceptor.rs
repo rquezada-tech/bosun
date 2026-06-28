@@ -5,6 +5,12 @@
 //! Requests without a token pass through — each handler is responsible
 //! for enforcing its own authentication requirements via get_claims() or
 //! require_admin() helpers.
+//!
+//! NOTE: The Login RPC path exclusion was removed because tonic 0.13
+//! does not expose request.uri() on interceptor Request<()>. Instead,
+//! the interceptor passes all requests through and handlers enforce
+//! their own auth. Login is implicitly allowed since it has no auth guard
+//! in its handler.
 
 use crate::auth::AuthService;
 use crate::auth::Claims;
@@ -15,25 +21,19 @@ pub fn create_interceptor(
     auth_service: Arc<AuthService>,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
     move |mut request: Request<()>| {
-        // Extract Authorization header if present
-        let token = match extract_bearer_token(request.metadata()) {
-            Some(t) => t,
-            None => {
-                // No token — allow through (used by Login RPC and public endpoints).
-                // Each handler is responsible for checking its own auth requirements
-                // via get_claims() or require_admin().
-                return Ok(request);
-            }
-        };
+        // Extract Authorization header
+        if let Some(token) = extract_bearer_token(request.metadata()) {
+            // Validate token
+            let claims = auth_service.validate_token(&token).map_err(|e| {
+                tracing::warn!("JWT validation failed: {}", e);
+                Status::unauthenticated(format!("Invalid or expired token: {}", e))
+            })?;
 
-        // Validate token
-        let claims = auth_service.validate_token(&token).map_err(|e| {
-            tracing::warn!("JWT validation failed: {}", e);
-            Status::unauthenticated(format!("Invalid or expired token: {}", e))
-        })?;
-
-        // Inject claims into request extensions for handlers
-        request.extensions_mut().insert(claims);
+            // Inject claims into request extensions for handlers
+            request.extensions_mut().insert(claims);
+        }
+        // Missing or invalid token = pass through.
+        // Each handler enforces its own auth via get_claims() / require_admin().
 
         Ok(request)
     }
@@ -55,9 +55,10 @@ fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> Option<Strin
 /// Helper to extract Claims from a request's extensions.
 /// Returns an error if no claims are present.
 pub fn get_claims<T>(request: &Request<T>) -> Result<&Claims, Status> {
-    request.extensions().get::<Claims>().ok_or_else(|| {
-        Status::unauthenticated("Authentication required. Use 'bosun login' first.")
-    })
+    request
+        .extensions()
+        .get::<Claims>()
+        .ok_or_else(|| Status::unauthenticated("Authentication required. Use 'bosun login' first."))
 }
 
 /// Helper to check if the claims have the admin role.

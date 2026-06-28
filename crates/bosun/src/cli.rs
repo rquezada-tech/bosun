@@ -83,6 +83,7 @@ impl Cli {
             }
             Command::Logout => self.run_logout().await,
             Command::Whoami => self.run_whoami().await,
+            Command::Backup { sub } => self.run_backup(&mut client, sub).await,
         }
     }
 }
@@ -710,7 +711,7 @@ impl Cli {
         };
 
         let response = client.login(username, &password).await?;
-        client.save_credentials(&response.token)?;
+        client.save_credentials(&response.token, &response.username, &response.role)?;
 
         if self.json {
             println!(
@@ -754,24 +755,74 @@ impl Cli {
 
         match creds {
             Some(creds) => {
-                // Decode the JWT to show info (without validating signature client-side)
-                let token_data = jsonwebtoken::decode_header(&creds.token)
+                // Decode the JWT without signature validation to extract claims
+                // (the server validates; client-side just reads for display)
+                use jsonwebtoken::DecodingKey;
+                let header = jsonwebtoken::decode_header(&creds.token)
                     .context("Failed to decode token header")?;
 
+                // Decode the payload without verifying signature
+                // Use a dummy key and skip validation
+                let mut validation = jsonwebtoken::Validation::default();
+                validation.insecure_disable_signature_validation();
+                validation.validate_exp = false; // Show expired tokens too
+
+                let token_data = jsonwebtoken::decode::<serde_json::Value>(
+                    &creds.token,
+                    &DecodingKey::from_secret(b""),
+                    &validation,
+                );
+
                 if self.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "logged_in": true,
-                            "token_file": creds_path_display(),
-                            "token_algorithm": format!("{:?}", token_data.alg),
-                        }))?
-                    );
+                    let mut json_out = serde_json::json!({
+                        "logged_in": true,
+                        "token_file": BosunClient::credentials_path().display().to_string(),
+                        "token_algorithm": format!("{:?}", header.alg),
+                        "username": creds.username,
+                        "role": creds.role,
+                    });
+                    if let Ok(ref data) = token_data {
+                        if let Some(exp) = data.claims.get("exp").and_then(|v| v.as_u64()) {
+                            json_out["expires_at_unix"] = serde_json::json!(exp);
+                            let dt = chrono::DateTime::from_timestamp(exp as i64, 0);
+                            if let Some(dt) = dt {
+                                json_out["expires_at"] = serde_json::json!(dt.to_rfc3339());
+                            }
+                        }
+                        if let Some(iat) = data.claims.get("iat").and_then(|v| v.as_u64()) {
+                            json_out["issued_at_unix"] = serde_json::json!(iat);
+                        }
+                    }
+                    println!("{}", serde_json::to_string_pretty(&json_out)?);
                 } else {
-                    let creds_path = BosunClient::credentials_path();
                     println!("✔ Logged in");
-                    println!("  Token file: {}", creds_path.display());
-                    println!("  Token algorithm: {:?}", token_data.alg);
+                    println!("  Username:  {}", creds.username);
+                    println!("  Role:      {}", creds.role);
+                    match token_data {
+                        Ok(data) => {
+                            if let Some(exp) = data.claims.get("exp").and_then(|v| v.as_u64()) {
+                                let dt = chrono::DateTime::from_timestamp(exp as i64, 0);
+                                match dt {
+                                    Some(dt) => {
+                                        let now = chrono::Utc::now();
+                                        if dt > now {
+                                            let remaining = dt - now;
+                                            let hours = remaining.num_hours();
+                                            let mins = remaining.num_minutes() % 60;
+                                            println!("  Expires:   {} (in {}h {}m)", dt.format("%Y-%m-%d %H:%M:%S UTC"), hours, mins);
+                                        } else {
+                                            println!("  Expired:   {} (token has expired)", dt.format("%Y-%m-%d %H:%M:%S UTC"));
+                                        }
+                                    }
+                                    None => println!("  Expires:   timestamp={}", exp),
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            println!("  (Unable to decode token payload — use 'bosun login' to re-authenticate)");
+                        }
+                    }
+                    println!("  Token:     {}", BosunClient::credentials_path().display());
                 }
             }
             None => {
@@ -789,11 +840,138 @@ impl Cli {
         }
         Ok(())
     }
-}
 
-/// Display helper for credentials path
-fn creds_path_display() -> String {
-    BosunClient::credentials_path().display().to_string()
+    // ── Backup ──────────────────────────────────────────────────────
+
+    async fn run_backup(&self, client: &mut BosunClient, sub: &BackupCmd) -> anyhow::Result<()> {
+        match sub {
+            BackupCmd::Create { app } => self.backup_create(client, app).await,
+            BackupCmd::List { app } => self.backup_list(client, app.as_deref()).await,
+            BackupCmd::Restore { backup_id } => self.backup_restore(client, backup_id).await,
+        }
+    }
+
+    async fn backup_create(&self, client: &mut BosunClient, app: &str) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("\u{1f4e6} Creating backup for '{app}'...");
+        }
+
+        let response = client.create_backup(app).await?;
+        let backup = response
+            .backup
+            .ok_or_else(|| anyhow::anyhow!("No backup info returned"))?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "backup_create",
+                    "id": backup.id,
+                    "app_name": backup.app_name,
+                    "timestamp_unix": backup.timestamp_unix,
+                    "size_bytes": backup.size_bytes,
+                    "status": "ok"
+                }))?
+            );
+        } else {
+            let size_mb = backup.size_bytes as f64 / 1_048_576.0;
+            let ts = chrono_human(backup.timestamp_unix);
+            println!(
+                "\u{2705} Backup '{}' created for '{}' ({} -- {:.1} MB)",
+                backup.id, backup.app_name, ts, size_mb
+            );
+        }
+        Ok(())
+    }
+
+    async fn backup_list(
+        &self,
+        client: &mut BosunClient,
+        app: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let backups = client.list_backups(app).await?;
+
+        if self.json {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "backups": backups.iter().map(|b| serde_json::json!({
+                    "id": b.id,
+                    "app_name": b.app_name,
+                    "timestamp_unix": b.timestamp_unix,
+                    "size_bytes": b.size_bytes,
+                })).collect::<Vec<_>>(),
+            }))?;
+            println!("{json}");
+            return Ok(());
+        }
+
+        if backups.is_empty() {
+            println!("No backups found.");
+            return Ok(());
+        }
+
+        use tabled::{Table, Tabled};
+        #[derive(Tabled)]
+        struct BackupRow {
+            #[tabled(rename = "BACKUP ID")]
+            id: String,
+            #[tabled(rename = "APP")]
+            app: String,
+            #[tabled(rename = "TIMESTAMP")]
+            timestamp: String,
+            #[tabled(rename = "SIZE")]
+            size: String,
+        }
+
+        let rows: Vec<BackupRow> = backups
+            .iter()
+            .map(|b| {
+                let size_mb = b.size_bytes as f64 / 1_048_576.0;
+                let ts = chrono::DateTime::from_timestamp(b.timestamp_unix as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| chrono_human(b.timestamp_unix));
+                BackupRow {
+                    id: b.id.clone(),
+                    app: b.app_name.clone(),
+                    timestamp: ts,
+                    size: format!("{:.1} MB", size_mb),
+                }
+            })
+            .collect();
+
+        let table = Table::new(rows);
+        println!("{table}");
+        Ok(())
+    }
+
+    async fn backup_restore(
+        &self,
+        client: &mut BosunClient,
+        backup_id: &str,
+    ) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("\u{1f504} Restoring backup '{backup_id}'...");
+        }
+
+        let response = client.restore_backup(backup_id).await?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "backup_restore",
+                    "backup_id": backup_id,
+                    "app_name": response.app_name,
+                    "status": response.status,
+                }))?
+            );
+        } else {
+            println!(
+                "\u{2705} Backup '{backup_id}' restored successfully for app '{}' (status: {})",
+                response.app_name, response.status
+            );
+        }
+        Ok(())
+    }
 }
 
 // ── Subcommand types ──────────────────────────────────────────────
@@ -854,6 +1032,11 @@ pub enum Command {
     Logout,
     /// Show current login info
     Whoami,
+    /// Manage backups (create, list, restore)
+    Backup {
+        #[command(subcommand)]
+        sub: BackupCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -909,6 +1092,26 @@ pub enum ConfigCmd {
     Show,
     /// Set a configuration value
     Set { key: String, value: String },
+}
+
+#[derive(Subcommand)]
+pub enum BackupCmd {
+    /// Create a backup of an app's volumes and configuration
+    Create {
+        /// App name to back up
+        app: String,
+    },
+    /// List all backups with timestamps and sizes
+    List {
+        /// Optional: filter by app name
+        #[arg(long)]
+        app: Option<String>,
+    },
+    /// Restore a backup by ID
+    Restore {
+        /// Backup ID to restore (from `bosun backup list`)
+        backup_id: String,
+    },
 }
 
 // ── Helpers ───────────────────────────────────────────────────────

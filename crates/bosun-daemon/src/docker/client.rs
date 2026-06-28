@@ -514,6 +514,137 @@ impl DockerClient {
         Ok(self.inner.inspect_container(name, None).await?)
     }
 
+    /// Force-remove a container by name, ignoring errors if it doesn't exist.
+    pub async fn force_remove_container(&self, name: &str) -> anyhow::Result<()> {
+        match self
+            .inner
+            .remove_container(
+                name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::info!("Force-removed container '{}'", name);
+                Ok(())
+            }
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
+                tracing::debug!("Container '{}' already gone", name);
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "Failed to force-remove container '{}': {}",
+                name,
+                e
+            )),
+        }
+    }
+
+    /// Restore a container from backup: create and start with the given config.
+    pub async fn restore_container(
+        &self,
+        app_name: &str,
+        image: &str,
+        port: u16,
+        _domain: Option<&str>,
+        env_vars: &HashMap<String, String>,
+        volumes: &HashMap<String, String>,
+        labels: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Restoring container '{}' from image '{}' (port={}, volumes={})",
+            app_name,
+            image,
+            port,
+            volumes.len()
+        );
+
+        // Create volume directories on host
+        for host_path in volumes.keys() {
+            std::fs::create_dir_all(host_path)?;
+        }
+
+        // Build volume binds: "host_path:container_path:rw"
+        let binds: Vec<String> = volumes
+            .iter()
+            .map(|(host, container)| format!("{}:{}:rw", host, container))
+            .collect();
+
+        // Port mapping
+        let port_binding = format!("{}/tcp", port);
+        let mut exposed_ports = HashMap::new();
+        exposed_ports.insert(port_binding.clone(), HashMap::new());
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            port_binding.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(port.to_string()),
+            }]),
+        );
+
+        // Merge provided labels with required bosun labels
+        let mut final_labels = labels.clone();
+        final_labels.entry("managed-by".to_string())
+            .or_insert_with(|| "bosun".to_string());
+        final_labels.entry("bosun.app".to_string())
+            .or_insert_with(|| app_name.to_string());
+        final_labels.insert("bosun.port".to_string(), port.to_string());
+        final_labels.insert("bosun.restored".to_string(), "true".to_string());
+
+        let env: Vec<String> = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        let config = Config {
+            image: Some(image.to_string()),
+            exposed_ports: Some(exposed_ports),
+            env: Some(env),
+            labels: Some(final_labels),
+            host_config: Some(HostConfig {
+                port_bindings: Some(port_bindings),
+                binds: Some(binds),
+                restart_policy: Some(bollard::models::RestartPolicy {
+                    name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: Some(3),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let create_options = CreateContainerOptions {
+            name: app_name.to_string(),
+            ..Default::default()
+        };
+
+        tracing::info!("Creating container '{}' from image '{}'...", app_name, image);
+        let container = self
+            .inner
+            .create_container(Some(create_options), config)
+            .await?;
+        tracing::info!("Container '{}' created (id={})", app_name, container.id);
+
+        self.inner.start_container::<String>(app_name, None).await?;
+        tracing::info!("Container '{}' started successfully", app_name);
+
+        // Wait for healthy
+        tracing::info!(
+            "Waiting up to 30s for restored container '{}' to become healthy...",
+            app_name
+        );
+        self.wait_for_container_healthy(app_name, 30).await?;
+
+        Ok(())
+    }
+
     /// Rolling update deploy: stop old container, remove it, start new one on
     /// the same port, and update Caddy. Brief downtime (~2-5s) for port swap.
     /// This is the pragmatic single-host approach without Swarm.

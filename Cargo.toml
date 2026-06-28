@@ -73,6 +73,8 @@ futures-util = "0.3"
 tokio-stream = "0.1"
 # Tar creation for Docker build contexts
 tar = "0.4"
+# Gzip compression for backups
+flate2 = "1.0"
 
 # ACME / Let's Encrypt
 # instant-acme = "0.6"  # uncomment when ready for SSL module
