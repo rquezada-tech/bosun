@@ -104,6 +104,9 @@ impl Bosun for BosunService {
             .await
             .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
 
+        // Persist app metadata and env vars
+        let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
+
         Ok(Response::new(DeployResponse {
             app_name,
             status: "deployed".to_string(),
@@ -183,22 +186,43 @@ impl Bosun for BosunService {
 
     async fn get_env(
         &self,
-        _request: Request<GetEnvRequest>,
+        request: Request<GetEnvRequest>,
     ) -> Result<Response<GetEnvResponse>, Status> {
-        todo!("get_env")
+        let req = request.into_inner();
+        tracing::info!("get_env called for {}", req.app_name);
+        let env = self
+            .store
+            .get_app_env(&req.app_name)
+            .map_err(|e| Status::internal(format!("Failed to get env: {}", e)))?;
+        Ok(Response::new(GetEnvResponse { env }))
     }
 
     async fn set_env(
         &self,
-        _request: Request<SetEnvRequest>,
+        request: Request<SetEnvRequest>,
     ) -> Result<Response<SetEnvResponse>, Status> {
-        todo!("set_env")
+        let req = request.into_inner();
+        tracing::info!(
+            "set_env called: app={}, key={}, value={}",
+            req.app_name,
+            req.key,
+            req.value
+        );
+        self.store
+            .set_app_env(&req.app_name, &req.key, &req.value)
+            .map_err(|e| Status::internal(format!("Failed to set env: {}", e)))?;
+        Ok(Response::new(SetEnvResponse {}))
     }
 
     async fn unset_env(
         &self,
-        _request: Request<UnsetEnvRequest>,
+        request: Request<UnsetEnvRequest>,
     ) -> Result<Response<UnsetEnvResponse>, Status> {
-        todo!("unset_env")
+        let req = request.into_inner();
+        tracing::info!("unset_env called: app={}, key={}", req.app_name, req.key);
+        self.store
+            .unset_app_env(&req.app_name, &req.key)
+            .map_err(|e| Status::internal(format!("Failed to unset env: {}", e)))?;
+        Ok(Response::new(UnsetEnvResponse {}))
     }
 }
