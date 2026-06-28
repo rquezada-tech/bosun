@@ -73,7 +73,23 @@ async fn main() -> anyhow::Result<()> {
     let metrics = metrics::MetricCollector::new(docker.inner.clone());
 
     // Create the gRPC service
-    let bosun_service = server::BosunService::new(docker, metrics, store);
+    let proxy = match proxy::CaddyClient::new().await {
+        Ok(client) => {
+            tracing::info!("Caddy reverse proxy integration enabled");
+            Some(client)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Caddy Admin API unreachable at http://localhost:2019: {}. \
+                 Reverse proxy disabled — apps will not receive HTTP traffic via domain. \
+                 Install Caddy and ensure the Admin API is enabled to use domain-based routing.",
+                e
+            );
+            None
+        }
+    };
+
+    let bosun_service = server::BosunService::new(docker, metrics, store, proxy);
 
     // Build the gRPC server
     let addr = args.listen.parse()?;

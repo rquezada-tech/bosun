@@ -109,12 +109,27 @@ if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: activ
     fi
 fi
 
-# ── Step 6: Optional — Remove Docker ──────────────────────────────────────────
+# ── Step 6: Optional Cleanup ───────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}╔══════════════════════════════════════════╗${NC}"
 echo -e "${YELLOW}║        Optional Cleanup                  ║${NC}"
 echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}"
 echo ""
+
+if command -v caddy &>/dev/null; then
+    read -r -p "$(echo -e "${YELLOW}Remove Caddy reverse proxy? [y/N]: ${NC}")" REMOVE_CADDY
+    if [[ "${REMOVE_CADDY,,}" =~ ^y(es)?$ ]]; then
+        info "Removing Caddy reverse proxy..."
+        systemctl stop caddy.service 2>/dev/null || true
+        systemctl disable caddy.service 2>/dev/null || true
+        apt-get purge -y caddy 2>/dev/null || true
+        rm -f /etc/apt/sources.list.d/caddy-stable.list
+        rm -f /usr/share/keyrings/caddy-archive-keyring.gpg
+        info "Caddy reverse proxy removed."
+    else
+        info "Keeping Caddy reverse proxy."
+    fi
+fi
 
 if command -v docker &>/dev/null; then
     read -r -p "$(echo -e "${YELLOW}Remove Docker Engine and all containers/images? [y/N]: ${NC}")" REMOVE_DOCKER

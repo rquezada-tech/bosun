@@ -76,12 +76,12 @@ $ bosun apps logs worker --follow
 - [ ] `bosun metrics` — real-time CPU, RAM, network per container
 - [ ] `bosun env` — environment variable management
 - [ ] `bosun config` — daemon configuration from the CLI
+- [x] `bosun deploy --ssl` — automatic Let's Encrypt HTTPS via Caddy (requires Caddy installed)
 - [ ] CI pipeline (GitHub Actions: build, test, clippy, fmt)
 
 ### Planned
 
-- [ ] Automatic Let's Encrypt SSL (`bosun deploy --ssl`)
-- [ ] Reverse proxy auto-configuration (Nginx / Caddy)
+- [ ] Reverse proxy auto-configuration (Caddy integration)
 - [ ] One-click app templates (deploy Redis, Postgres, etc. with one command)
 - [ ] Health checks and auto-restart
 - [ ] Webhook triggers (deploy on `git push`)
@@ -99,6 +99,7 @@ $ bosun apps logs worker --follow
 - **Server:** Linux or macOS with [Docker Engine](https://docs.docker.com/engine/install/) 20.10+
 - **Client:** macOS or Linux with the `bosun` binary
 - **Network:** The daemon port (default `9090`) accessible from your client
+- **Caddy (optional):** The install script installs [Caddy](https://caddyserver.com/) automatically for reverse proxy and Let's Encrypt SSL
 
 ### Install (one command)
 
@@ -110,6 +111,7 @@ curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/in
 
 This single command:
 - Installs Docker Engine (if not present)
+- Installs Caddy reverse proxy (port 80/443, automatic Let's Encrypt)
 - Installs the Rust toolchain
 - Clones and builds `bosun-daemon` from source
 - Creates `/etc/bosun/` with a self-signed TLS certificate
@@ -161,6 +163,9 @@ export BOSUN_DAEMON=https://my-server:9090
 # Deploy your first app
 bosun deploy ./my-node-app --domain api.my-site.com
 
+# Deploy with automatic HTTPS (requires Caddy)
+bosun deploy ./my-node-app --domain api.my-site.com --ssl
+
 # Check it's running
 bosun apps list
 
@@ -200,10 +205,17 @@ bosun --cert ~/.bosun/client.crt --key ~/.bosun/client.key apps list
 │                      │                             │  └──────────────────────┘  │
 │                      │                             │  ┌──────────────────────┐  │
 │                      │                             │  │ Proxy config (tera)  │  │
-│                      │                             │  │ • nginx/caddy tmpl   │  │
+│                      │                             │  │ • Caddy config gen   │  │
 │                      │                             │  │ • hot-reload         │  │
 │                      │                             │  └──────────────────────┘  │
-└──────────────────────┘                             └────────────────────────────┘
+└──────────────────────┘                             └───────────┬────────────────┘
+                                                                 │
+                                                    ┌────────────▼────────────────┐
+                                                    │   Caddy (reverse proxy)    │
+                                                    │   • automatic TLS (LE)     │
+                                                    │   • HTTP → HTTPS redirect  │
+                                                    │   • route → Docker apps    │
+                                                    └────────────────────────────┘
 ```
 
 ### Design decisions
@@ -247,8 +259,8 @@ For the price of a $5/month VPS, you get:
 - Automated Docker deployments
 - Real-time metrics
 - Streaming logs
-- SSL certificates
-- Reverse proxy routing
+- SSL certificates (automatic via Caddy + Let's Encrypt)
+- Reverse proxy routing (Caddy)
 
 No Kubernetes. No cloud vendor lock-in. No dashboard you don't need.
 

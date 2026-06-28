@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # bosun — one-command VPS install script
-# Bootstraps a fresh Ubuntu/Debian VPS with Docker, Rust, the bosun-daemon,
-# TLS certificates, and a systemd service. Idempotent: safe to run multiple times.
+# Bootstraps a fresh Ubuntu/Debian VPS with Docker, Caddy reverse proxy,
+# Rust, the bosun-daemon, TLS certificates, and a systemd service.
+# Idempotent: safe to run multiple times.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash
@@ -113,8 +114,55 @@ fi
 # Ensure current user can access Docker (if we created a bosun user already)
 # We'll handle group membership in the user-creation step below.
 
-# ── Step 3: Install Rust toolchain ────────────────────────────────────────────
-header "Step 3/10: Installing Rust toolchain"
+# ── Step 3: Install Caddy reverse proxy ────────────────────────────────────────
+header "Step 3/11: Installing Caddy reverse proxy"
+
+if command -v caddy &>/dev/null; then
+    CADDY_VERSION="$(caddy version 2>/dev/null || echo 'unknown')"
+    info "Caddy is already installed."
+    info "  Version: $CADDY_VERSION"
+else
+    info "Installing Caddy from official repository..."
+
+    # Install prerequisites
+    apt-get install -y -qq debian-archive-keyring curl
+
+    # Add Caddy GPG key
+    if [ ! -f /usr/share/keyrings/caddy-archive-keyring.gpg ]; then
+        curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+            | gpg --dearmor -o /usr/share/keyrings/caddy-archive-keyring.gpg
+    fi
+
+    # Add Caddy repository
+    if [ ! -f /etc/apt/sources.list.d/caddy-stable.list ]; then
+        curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+            | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+    fi
+
+    apt-get update -qq
+    apt-get install -y -qq caddy
+
+    # Enable and start Caddy
+    systemctl enable caddy.service
+    if systemctl is-active --quiet caddy.service; then
+        systemctl restart caddy.service
+    else
+        systemctl start caddy.service
+    fi
+
+    # Verify Caddy is running
+    sleep 2
+    if systemctl is-active --quiet caddy.service; then
+        info "Caddy is running on port 80/443."
+    else
+        warn "Caddy installed but may not be running. Check: systemctl status caddy"
+    fi
+
+    info "Caddy installed successfully."
+fi
+
+# ── Step 4: Install Rust toolchain ────────────────────────────────────────────
+header "Step 4/11: Installing Rust toolchain"
 
 if command -v cargo &>/dev/null && rustup --version &>/dev/null 2>&1; then
     info "Rust toolchain is already installed."
@@ -141,8 +189,8 @@ if ! command -v cargo &>/dev/null; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# ── Step 4: Clone / update bosun repo ─────────────────────────────────────────
-header "Step 4/10: Fetching bosun source"
+# ── Step 5: Clone / update bosun repo ─────────────────────────────────────────
+header "Step 5/11: Fetching bosun source"
 
 if [ -d "$BUILD_DIR/.git" ] && git -C "$BUILD_DIR" remote get-url origin &>/dev/null 2>&1; then
     info "Updating existing clone..."
@@ -159,8 +207,8 @@ else
     }
 fi
 
-# ── Step 5: Build bosun-daemon ────────────────────────────────────────────────
-header "Step 5/10: Building bosun-daemon (release)"
+# ── Step 6: Build bosun-daemon ────────────────────────────────────────────────
+header "Step 6/11: Building bosun-daemon (release)"
 
 cd "$BUILD_DIR"
 
@@ -176,14 +224,14 @@ fi
 install -m 0755 "$BUILD_DIR/target/release/bosun-daemon" "$BOSUN_BIN_DIR/bosun-daemon"
 info "Installed bosun-daemon to $BOSUN_BIN_DIR/bosun-daemon"
 
-# ── Step 6: Create /etc/bosun/ directory ──────────────────────────────────────
-header "Step 6/10: Setting up configuration directory"
+# ── Step 7: Create /etc/bosun/ directory ──────────────────────────────────────
+header "Step 7/11: Setting up configuration directory"
 
 mkdir -p "$BOSUN_CONFIG_DIR"
 chmod 0750 "$BOSUN_CONFIG_DIR"
 
-# ── Step 7: Generate self-signed TLS cert (if no certs provided) ──────────────
-header "Step 7/10: Setting up TLS certificates"
+# ── Step 8: Generate self-signed TLS cert (if no certs provided) ──────────────
+header "Step 8/11: Setting up TLS certificates"
 
 if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
     info "TLS certificates already present:"
@@ -203,7 +251,8 @@ else
 fi
 
 if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
-    info "Generating self-signed TLS certificate..."
+    info "Generating self-signed TLS certificate for gRPC mTLS..."
+    info "(This is for daemon communication. Edge SSL for deployed apps is handled by Caddy.)"
 
     # Detect server hostname or IP for the cert
     SERVER_NAME="${SERVER_NAME:-$(hostname -f 2>/dev/null || hostname)}"
@@ -218,15 +267,18 @@ if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
     chmod 0600 "$KEY_FILE"
     chmod 0644 "$CERT_FILE"
 
-    info "Self-signed certificate generated."
-    warn "This is a self-signed certificate. For production, replace with a real cert"
-    warn "(e.g., Let's Encrypt via certbot) at:"
+    info "Self-signed certificate generated for gRPC mTLS."
+    warn "This is a self-signed certificate for daemon-to-CLI communication."
+    warn "For edge SSL on deployed apps, install Caddy and use: bosun deploy --ssl --domain myapp.example.com"
+    warn "Caddy will automatically provision Let's Encrypt certificates for your public domains."
+    warn ""
+    warn "Self-signed certs:"
     warn "  $CERT_FILE"
     warn "  $KEY_FILE"
 fi
 
-# ── Step 8: Create systemd service ────────────────────────────────────────────
-header "Step 8/10: Creating systemd service"
+# ── Step 9: Create systemd service ────────────────────────────────────────────
+header "Step 9/11: Creating systemd service"
 
 # Create bosun system user if it doesn't exist
 if ! id -u "$BOSUN_USER" &>/dev/null; then
@@ -293,8 +345,8 @@ chmod 0644 "$SERVICE_FILE"
 # Reload systemd
 systemctl daemon-reload
 
-# ── Step 9: Enable and start the service ──────────────────────────────────────
-header "Step 9/10: Enabling and starting bosun-daemon"
+# ── Step 10: Enable and start the service ──────────────────────────────────────
+header "Step 10/11: Enabling and starting bosun-daemon"
 
 systemctl enable bosun-daemon.service
 
@@ -316,8 +368,8 @@ else
     warn "Check logs: journalctl -u bosun-daemon -f"
 fi
 
-# ── Step 10: Open firewall port ───────────────────────────────────────────────
-header "Step 10/10: Configuring firewall"
+# ── Step 11: Open firewall port ───────────────────────────────────────────────
+header "Step 11/11: Configuring firewall"
 
 BOSUN_PORT="${BOSUN_LISTEN_ADDR##*:}"
 
@@ -343,7 +395,9 @@ echo -e "${GREEN}║                                                            
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${CYAN}Daemon status:${NC}  systemctl status bosun-daemon"
+echo -e "  ${CYAN}Caddy status:${NC}   systemctl status caddy"
 echo -e "  ${CYAN}View logs:${NC}      journalctl -u bosun-daemon -f"
+echo -e "  ${CYAN}Caddy logs:${NC}     journalctl -u caddy -f"
 echo -e "  ${CYAN}Config dir:${NC}     $BOSUN_CONFIG_DIR"
 echo -e "  ${CYAN}Data dir:${NC}       $BOSUN_DATA_DIR"
 echo -e "  ${CYAN}Service file:${NC}   $SERVICE_FILE"
@@ -357,7 +411,9 @@ echo -e "     export BOSUN_DAEMON=https://$(hostname -I 2>/dev/null | awk '{prin
 echo ""
 echo -e "  3. Deploy your first app:"
 echo -e "     bosun deploy ./my-app --domain my-app.example.com"
+echo -e "     # With SSL (requires Caddy):"
+echo -e "     bosun deploy ./my-app --domain my-app.example.com --ssl"
 echo ""
-echo -e "  ${YELLOW}Note:${NC} A self-signed TLS certificate was generated."
-echo -e "  ${YELLOW}For trusted TLS, replace the certs in $BOSUN_CONFIG_DIR.${NC}"
+echo -e "  ${YELLOW}Note:${NC} A self-signed TLS certificate was generated for gRPC mTLS."
+echo -e "  ${YELLOW}Edge SSL (HTTPS for deployed apps) is handled by Caddy via Let's Encrypt.${NC}"
 echo ""

@@ -16,6 +16,7 @@ pub struct BosunService {
     pub docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
     pub metrics: std::sync::Arc<crate::metrics::MetricCollector>,
     pub store: std::sync::Arc<crate::persist::Store>,
+    pub proxy: Option<std::sync::Arc<crate::proxy::CaddyClient>>,
 }
 
 impl BosunService {
@@ -23,11 +24,13 @@ impl BosunService {
         docker: crate::docker::DockerClient,
         metrics: crate::metrics::MetricCollector,
         store: crate::persist::Store,
+        proxy: Option<crate::proxy::CaddyClient>,
     ) -> Self {
         Self {
             docker: std::sync::Arc::new(tokio::sync::Mutex::new(docker)),
             metrics: std::sync::Arc::new(metrics),
             store: std::sync::Arc::new(store),
+            proxy: proxy.map(std::sync::Arc::new),
         }
     }
 }
@@ -130,15 +133,30 @@ impl Bosun for BosunService {
             .to_string();
         let port = req.port.unwrap_or(8080) as u16;
         let domain = req.domain.as_deref();
+        let enable_ssl = req.enable_ssl;
+
+        // Validate SSL flag: requires a domain for Let's Encrypt via Caddy
+        if enable_ssl {
+            if domain.is_none() {
+                return Err(Status::invalid_argument(
+                    "SSL requires --domain. Let's Encrypt needs a public domain name to issue a certificate.",
+                ));
+            }
+            tracing::info!(
+                "SSL enabled for domain {} — SSL will be provisioned via Caddy (Let's Encrypt)",
+                domain.unwrap()
+            );
+        }
 
         let env_vars: std::collections::HashMap<String, String> = req.env;
 
         tracing::info!(
-            "Deploy request: app={}, path={}, domain={:?}, port={}",
+            "Deploy request: app={}, path={}, domain={:?}, port={}, ssl={}",
             app_name,
             req.context_path,
             domain,
-            port
+            port,
+            enable_ssl
         );
 
         let docker = self.docker.lock().await;
@@ -153,8 +171,40 @@ impl Bosun for BosunService {
             .await
             .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
 
+        // Health check: wait up to 30s for the container to reach running state
+        // before configuring the proxy (Caddy)
+        tracing::info!(
+            "Waiting up to 30s for container '{}' to become healthy...",
+            app_name
+        );
+        docker
+            .wait_for_container_healthy(&app_name, 30)
+            .await
+            .map_err(|e| {
+                Status::internal(format!(
+                    "Container '{}' failed health check: {}. Check container logs for details.",
+                    app_name, e
+                ))
+            })?;
+
         // Persist app metadata and env vars
         let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
+
+        // Configure Caddy reverse proxy if domain was provided
+        if let (Some(domain), Some(proxy)) = (domain, &self.proxy) {
+            tracing::info!(
+                "Configuring Caddy reverse proxy: {} -> localhost:{}",
+                domain,
+                port
+            );
+            if let Err(e) = proxy.configure_app(domain, port).await {
+                tracing::error!(
+                    "Failed to configure Caddy proxy for {}: {}. Container is running but won't receive HTTP traffic via domain.",
+                    domain,
+                    e
+                );
+            }
+        }
 
         Ok(Response::new(DeployResponse {
             app_name,

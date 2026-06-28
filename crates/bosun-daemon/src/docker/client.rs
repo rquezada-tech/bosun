@@ -294,6 +294,54 @@ impl DockerClient {
 
         Ok(())
     }
+
+    /// Wait up to `timeout_secs` for a container to reach running state.
+    /// Polls `inspect_container` every 2 seconds.
+    pub async fn wait_for_container_healthy(
+        &self,
+        container_name: &str,
+        timeout_secs: u64,
+    ) -> anyhow::Result<()> {
+        use tokio::time::{sleep, Duration};
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+        while std::time::Instant::now() < deadline {
+            match self.inner.inspect_container(container_name, None).await {
+                Ok(info) => {
+                    if let Some(state) = &info.state {
+                        if state.running == Some(true) {
+                            tracing::info!(
+                                "Container '{}' is healthy (state=running)",
+                                container_name
+                            );
+                            return Ok(());
+                        } else {
+                            tracing::debug!(
+                                "Container '{}' status={:?}, waiting...",
+                                container_name,
+                                state.status
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Container '{}' inspect error (may be starting): {}",
+                        container_name,
+                        e
+                    );
+                }
+            }
+            sleep(Duration::from_secs(2)).await;
+        }
+
+        anyhow::bail!(
+            "Container '{}' did not become healthy within {}s",
+            container_name,
+            timeout_secs
+        );
+    }
 }
 
 #[cfg(test)]

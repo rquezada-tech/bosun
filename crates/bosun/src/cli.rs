@@ -503,7 +503,7 @@ pub enum Command {
         /// Domain name for the app
         #[arg(long)]
         domain: Option<String>,
-        /// Enable Let's Encrypt SSL
+        /// Enable HTTPS via Let's Encrypt (requires Caddy and a public domain)
         #[arg(long)]
         ssl: bool,
     },

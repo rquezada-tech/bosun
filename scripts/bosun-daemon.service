@@ -1,8 +1,8 @@
 [Unit]
 Description=Bosun PaaS Daemon
 Documentation=https://github.com/rquezada-tech/bosun
-After=network-online.target docker.service
-Wants=network-online.target docker.service
+After=network-online.target docker.service caddy.service
+Wants=network-online.target docker.service caddy.service
 Requires=docker.service
 
 [Service]
