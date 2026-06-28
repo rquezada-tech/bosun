@@ -41,12 +41,19 @@ message AppMetric {
     uint64 timestamp_unix = 6;
 }
 
+enum DeployStrategy {
+    DEPLOY_STRATEGY_DIRECT = 0;
+    DEPLOY_STRATEGY_ROLLING = 1;
+    DEPLOY_STRATEGY_BLUE_GREEN = 2;
+}
+
 message DeployRequest {
     string context_path = 1;      // path on server (already uploaded)
     optional string domain = 2;
     bool enable_ssl = 3;
     map<string, string> env = 4;
     optional uint32 port = 5;
+    DeployStrategy strategy = 6;
 }
 
 message DeployResponse {
@@ -72,6 +79,7 @@ service Bosun {
 
     // Deployment
     rpc Deploy(DeployRequest) returns (DeployResponse);
+    rpc RollbackApp(RollbackAppRequest) returns (RollbackAppResponse);
 
     // Metrics
     rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
@@ -118,6 +126,14 @@ message GetMetricsRequest {
 }
 message GetMetricsResponse {
     repeated AppMetric metrics = 1;
+}
+
+message RollbackAppRequest {
+    string app_name = 1;
+}
+message RollbackAppResponse {
+    string status = 1;
+    string message = 2;
 }
 
 message GetEnvRequest {

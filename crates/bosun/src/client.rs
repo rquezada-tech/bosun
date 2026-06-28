@@ -139,6 +139,7 @@ impl BosunClient {
         enable_ssl: bool,
         env: std::collections::HashMap<String, String>,
         port: Option<u32>,
+        strategy: DeployStrategy,
     ) -> anyhow::Result<DeployResponse> {
         let response = self
             .inner
@@ -148,6 +149,7 @@ impl BosunClient {
                 enable_ssl,
                 env,
                 port,
+                strategy: strategy.into(),
             })
             .await
             .context(format!("gRPC Deploy failed for '{context_path}'"))?
@@ -245,5 +247,18 @@ impl BosunClient {
             .context("gRPC ListTemplates failed")?
             .into_inner();
         Ok(response.templates)
+    }
+
+    /// Rollback an app (blue-green switch or no-op for other strategies).
+    pub async fn rollback_app(&mut self, app_name: &str) -> anyhow::Result<RollbackAppResponse> {
+        let response = self
+            .inner
+            .rollback_app(RollbackAppRequest {
+                app_name: app_name.to_string(),
+            })
+            .await
+            .context(format!("gRPC RollbackApp failed for '{app_name}'"))?
+            .into_inner();
+        Ok(response)
     }
 }

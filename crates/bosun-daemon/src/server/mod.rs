@@ -149,6 +149,19 @@ impl Bosun for BosunService {
         let domain = req.domain.as_deref();
         let enable_ssl = req.enable_ssl;
 
+        // Map proto DeployStrategy enum (i32) to crate deploy strategy
+        // 0 = DIRECT (default), 1 = ROLLING, 2 = BLUE_GREEN
+        let strategy = match req.strategy {
+            1 => crate::deploy::DeployStrategy::Rolling,
+            2 => crate::deploy::DeployStrategy::BlueGreen,
+            _ => crate::deploy::DeployStrategy::Direct,
+        };
+
+        tracing::info!(
+            "Deploy request: strategy={:?}",
+            strategy
+        );
+
         // Validate SSL flag: requires a domain for Let's Encrypt via Caddy
         if enable_ssl {
             if domain.is_none() {
@@ -228,67 +241,104 @@ impl Bosun for BosunService {
             }));
         }
 
-        // Not a template — use the existing build-from-directory flow
+        // Not a template — use the strategy dispatcher for build-from-directory flow
         tracing::info!(
-            "Deploy request: app={}, path={}, domain={:?}, port={}, ssl={}",
+            "Deploy request: app={}, path={}, domain={:?}, port={}, ssl={}, strategy={:?}",
             app_name,
             req.context_path,
             domain,
             port,
-            enable_ssl
+            enable_ssl,
+            strategy
         );
 
         let docker = self.docker.lock().await;
-        docker
-            .deploy(
-                std::path::Path::new(&req.context_path),
-                &app_name,
-                domain,
-                port,
-                &env_vars,
-            )
-            .await
-            .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
+        let proxy = self.proxy.as_deref();
 
-        // Health check: wait up to 30s for the container to reach running state
-        // before configuring the proxy (Caddy)
-        tracing::info!(
-            "Waiting up to 30s for container '{}' to become healthy...",
-            app_name
-        );
-        docker
-            .wait_for_container_healthy(&app_name, 30)
-            .await
-            .map_err(|e| {
-                Status::internal(format!(
-                    "Container '{}' failed health check: {}. Check container logs for details.",
-                    app_name, e
-                ))
-            })?;
+        let (_container_name, _actual_port) = crate::deploy::execute_deploy(
+            strategy,
+            &docker,
+            proxy,
+            std::path::Path::new(&req.context_path),
+            &app_name,
+            domain,
+            port,
+            &env_vars,
+        )
+        .await
+        .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
 
         // Persist app metadata and env vars
         let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
-
-        // Configure Caddy reverse proxy if domain was provided
-        if let (Some(domain), Some(proxy)) = (domain, &self.proxy) {
-            tracing::info!(
-                "Configuring Caddy reverse proxy: {} -> localhost:{}",
-                domain,
-                port
-            );
-            if let Err(e) = proxy.configure_app(domain, port).await {
-                tracing::error!(
-                    "Failed to configure Caddy proxy for {}: {}. Container is running but won't receive HTTP traffic via domain.",
-                    domain,
-                    e
-                );
-            }
-        }
 
         Ok(Response::new(DeployResponse {
             app_name,
             status: "deployed".to_string(),
         }))
+    }
+
+    async fn rollback_app(
+        &self,
+        request: Request<RollbackAppRequest>,
+    ) -> Result<Response<RollbackAppResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("rollback_app called for {}", req.app_name);
+
+        let docker = self.docker.lock().await;
+
+        // Check if the app has a blue-green setup by inspecting labels
+        match docker.inspect_container(&req.app_name).await {
+            Ok(inspect) => {
+                let labels = inspect
+                    .config
+                    .and_then(|c| c.labels)
+                    .unwrap_or_default();
+                let has_blue_green = labels.get("bosun.strategy").map(|s| s.as_str()) == Some("blue_green");
+
+                if has_blue_green {
+                    // Perform blue-green rollback: switch to inactive color
+                    match docker.rollback_blue_green(&req.app_name).await {
+                        Ok((color, _port)) => {
+                            tracing::info!(
+                                "Blue-green rollback successful for '{}' (switched to {})",
+                                req.app_name, color
+                            );
+                            Ok(Response::new(RollbackAppResponse {
+                                status: "rolled_back".to_string(),
+                                message: format!(
+                                    "App '{}' rolled back to previous color ({})",
+                                    req.app_name, color
+                                ),
+                            }))
+                        }
+                        Err(e) => {
+                            tracing::error!("Rollback failed for '{}': {}", req.app_name, e);
+                            Err(Status::internal(format!("Rollback failed: {}", e)))
+                        }
+                    }
+                } else {
+                    // No blue-green setup — can't rollback
+                    tracing::info!(
+                        "App '{}' does not have blue-green deploy setup. Rollback not available.",
+                        req.app_name
+                    );
+                    Ok(Response::new(RollbackAppResponse {
+                        status: "not_available".to_string(),
+                        message: format!(
+                            "Blue-green deploy required for rollback. App '{}' uses direct/rolling strategy.",
+                            req.app_name
+                        ),
+                    }))
+                }
+            }
+            Err(_) => {
+                // App doesn't exist
+                Err(Status::not_found(format!(
+                    "App '{}' not found",
+                    req.app_name
+                )))
+            }
+        }
     }
 
     async fn get_metrics(

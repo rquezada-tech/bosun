@@ -1,8 +1,30 @@
 //! CLI argument definitions and command implementations for Bosun.
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crate::client::BosunClient;
+use crate::proto::bosun::v1::DeployStrategy;
+
+/// CLI argument enum for deploy strategies (maps to proto DeployStrategy).
+#[derive(Clone, Debug, ValueEnum)]
+pub enum StrategyArg {
+    /// Direct deploy: build, stop old, start new
+    Direct,
+    /// Rolling deploy: gradually replace instances
+    Rolling,
+    /// Blue-green deploy: maintain two environments, switch traffic
+    BlueGreen,
+}
+
+impl From<StrategyArg> for DeployStrategy {
+    fn from(arg: StrategyArg) -> Self {
+        match arg {
+            StrategyArg::Direct => DeployStrategy::Direct,
+            StrategyArg::Rolling => DeployStrategy::Rolling,
+            StrategyArg::BlueGreen => DeployStrategy::BlueGreen,
+        }
+    }
+}
 
 /// Bosun — minimal PaaS orchestration from your terminal.
 #[derive(Parser)]
@@ -44,14 +66,18 @@ impl Cli {
 
         match &self.command {
             Command::Apps { sub } => self.run_apps(&mut client, sub).await,
-            Command::Deploy { path, domain, ssl } => {
-                self.run_deploy(&mut client, path, domain.as_deref(), *ssl).await
+            Command::Deploy { path, domain, ssl, strategy } => {
+                let deploy_strategy: DeployStrategy = strategy.clone().into();
+                self.run_deploy(&mut client, path, domain.as_deref(), *ssl, &deploy_strategy).await
             }
             Command::Metrics { app, live } => {
                 self.run_metrics(&mut client, app.as_deref(), *live).await
             }
             Command::Env { sub } => self.run_env(&mut client, sub).await,
             Command::Config { sub } => self.run_config(sub).await,
+            Command::Rollback { app } => {
+                self.run_rollback(&mut client, app).await
+            }
         }
     }
 }
@@ -329,6 +355,7 @@ impl Cli {
                 false,
                 std::collections::HashMap::new(),
                 Some(template.default_port),
+                DeployStrategy::Direct,
             )
             .await?;
 
@@ -355,9 +382,11 @@ impl Cli {
         path: &str,
         domain: Option<&str>,
         ssl: bool,
+        strategy: &DeployStrategy,
     ) -> anyhow::Result<()> {
+        let strategy_label = strategy_label(strategy);
         if !self.json {
-            eprintln!("🚀 Deploying from '{path}'...");
+            eprintln!("🚀 Deploying {path} (strategy: {strategy_label})...");
         }
 
         let response = client
@@ -367,6 +396,7 @@ impl Cli {
                 ssl,
                 std::collections::HashMap::new(),
                 None,
+                *strategy,
             )
             .await?;
 
@@ -374,6 +404,7 @@ impl Cli {
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({
                 "app_name": response.app_name,
                 "status": response.status,
+                "strategy": strategy_label,
             }))?);
         } else {
             let domain_info = domain.map(|d| format!(" at https://{d}")).unwrap_or_default();
@@ -381,6 +412,41 @@ impl Cli {
                 "✔ Deployed '{}' successfully{} (status: {})",
                 response.app_name, domain_info, response.status
             );
+        }
+        Ok(())
+    }
+
+    // ── Rollback ──────────────────────────────────────────────────
+
+    async fn run_rollback(
+        &self,
+        client: &mut BosunClient,
+        app: &str,
+    ) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("⏪ Rolling back '{app}'...");
+        }
+
+        let response = client.rollback_app(app).await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "app": app,
+                "status": response.status,
+                "message": response.message,
+            }))?);
+        } else {
+            match response.status.as_str() {
+                "rolled_back" => {
+                    println!("✔ {}", response.message);
+                }
+                "not_available" => {
+                    println!("⚠ {}", response.message);
+                }
+                _ => {
+                    println!("{}: {}", response.status, response.message);
+                }
+            }
         }
         Ok(())
     }
@@ -621,6 +687,9 @@ pub enum Command {
         /// Enable HTTPS via Let's Encrypt (requires Caddy and a public domain)
         #[arg(long)]
         ssl: bool,
+        /// Deploy strategy (direct, rolling, or blue-green)
+        #[arg(long, value_enum, default_value = "direct")]
+        strategy: StrategyArg,
     },
     /// Show resource metrics for apps
     Metrics {
@@ -639,6 +708,11 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
+    },
+    /// Rollback an app (blue-green switch or no-op for direct/rolling)
+    Rollback {
+        /// App name to rollback
+        app: String,
     },
 }
 
@@ -695,6 +769,15 @@ pub enum ConfigCmd {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
+
+/// Convert a DeployStrategy to a human-readable string.
+fn strategy_label(strategy: &DeployStrategy) -> &'static str {
+    match strategy {
+        DeployStrategy::Direct => "direct",
+        DeployStrategy::Rolling => "rolling",
+        DeployStrategy::BlueGreen => "blue-green",
+    }
+}
 
 /// Convert a Unix timestamp (seconds) to a human-readable string.
 fn chrono_human(ts: u64) -> String {

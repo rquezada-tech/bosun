@@ -17,6 +17,7 @@ use tonic::transport::{Identity, Server};
 
 mod server;
 mod docker;
+mod deploy;
 mod health;
 mod metrics;
 mod proxy;

@@ -122,17 +122,30 @@ async fn handle_webhook_post(
         }
     };
     let body_str = String::from_utf8_lossy(&body_bytes);
-
-    tracing::info!(
-        "Webhook received for app '{}' ({} bytes of payload)",
-        app_name,
-        body_bytes.len()
-    );
     tracing::debug!("Webhook payload: {}", body_str);
 
-    // Trigger redeploy
+    // Read strategy header (default to "rolling" for webhook-triggered deploys)
+    let strategy = headers
+        .get("x-bosun-strategy")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("rolling")
+        .to_string();
+    let strategy_value = match strategy.as_str() {
+        "blue-green" | "blue_green" => "blue_green",
+        "direct" => "direct",
+        _ => "rolling", // default for git push = rolling update
+    };
+
+    tracing::info!(
+        "Webhook received for app '{}' ({} bytes of payload, strategy={})",
+        app_name,
+        body_bytes.len(),
+        strategy_value
+    );
+
+    // Trigger redeploy with strategy
     let docker = state.docker.lock().await;
-    match docker.redeploy(&app_name).await {
+    match docker.redeploy(&app_name, strategy_value).await {
         Ok(()) => {
             tracing::info!("App '{}' redeployed successfully via webhook", app_name);
             (StatusCode::OK, format!("ok: app '{}' redeployed\n", app_name)).into_response()
