@@ -335,11 +335,8 @@ impl Cli {
         name_override: Option<&str>,
         version: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Validate template exists by listing templates
         let templates = client.list_templates().await?;
-        let template = templates
-            .iter()
-            .find(|t| t.name == template_name);
+        let template = templates.iter().find(|t| t.name == template_name);
 
         if template.is_none() {
             let available: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
@@ -362,7 +359,6 @@ impl Cli {
             );
         }
 
-        // Pass version request through env var (server resolves it)
         let mut env = std::collections::HashMap::new();
         if let Some(v) = version {
             env.insert("BOSUN_TEMPLATE_VERSION".to_string(), v.to_string());
@@ -503,7 +499,6 @@ impl Cli {
                     let ram_mb = metric.ram_bytes as f64 / 1_048_576.0;
                     let rx_kb = metric.net_rx_bytes as f64 / 1024.0;
                     let tx_kb = metric.net_tx_bytes as f64 / 1024.0;
-                    // Use \r to update in-place for live view
                     print!(
                         "\r\x1b[K  {:<20}  CPU: {:>5.1}%  RAM: {:>6.1} MB  NET RX: {:>7.1} KB  NET TX: {:>7.1} KB",
                         metric.app_name, metric.cpu_percent, ram_mb, rx_kb, tx_kb
@@ -698,7 +693,6 @@ impl Cli {
         let password = match password {
             Some(p) => p.to_string(),
             None => {
-                // Prompt for password
                 eprint!("Password: ");
                 use std::io::Write;
                 let _ = std::io::stderr().flush();
@@ -755,74 +749,23 @@ impl Cli {
 
         match creds {
             Some(creds) => {
-                // Decode the JWT without signature validation to extract claims
-                // (the server validates; client-side just reads for display)
-                use jsonwebtoken::DecodingKey;
-                let header = jsonwebtoken::decode_header(&creds.token)
+                let token_data = jsonwebtoken::decode_header(&creds.token)
                     .context("Failed to decode token header")?;
 
-                // Decode the payload without verifying signature
-                // Use a dummy key and skip validation
-                let mut validation = jsonwebtoken::Validation::default();
-                validation.insecure_disable_signature_validation();
-                validation.validate_exp = false; // Show expired tokens too
-
-                let token_data = jsonwebtoken::decode::<serde_json::Value>(
-                    &creds.token,
-                    &DecodingKey::from_secret(b""),
-                    &validation,
-                );
-
                 if self.json {
-                    let mut json_out = serde_json::json!({
-                        "logged_in": true,
-                        "token_file": BosunClient::credentials_path().display().to_string(),
-                        "token_algorithm": format!("{:?}", header.alg),
-                        "username": creds.username,
-                        "role": creds.role,
-                    });
-                    if let Ok(ref data) = token_data {
-                        if let Some(exp) = data.claims.get("exp").and_then(|v| v.as_u64()) {
-                            json_out["expires_at_unix"] = serde_json::json!(exp);
-                            let dt = chrono::DateTime::from_timestamp(exp as i64, 0);
-                            if let Some(dt) = dt {
-                                json_out["expires_at"] = serde_json::json!(dt.to_rfc3339());
-                            }
-                        }
-                        if let Some(iat) = data.claims.get("iat").and_then(|v| v.as_u64()) {
-                            json_out["issued_at_unix"] = serde_json::json!(iat);
-                        }
-                    }
-                    println!("{}", serde_json::to_string_pretty(&json_out)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "logged_in": true,
+                            "token_file": creds_path_display(),
+                            "token_algorithm": format!("{:?}", token_data.alg),
+                        }))?
+                    );
                 } else {
+                    let creds_path = BosunClient::credentials_path();
                     println!("✔ Logged in");
-                    println!("  Username:  {}", creds.username);
-                    println!("  Role:      {}", creds.role);
-                    match token_data {
-                        Ok(data) => {
-                            if let Some(exp) = data.claims.get("exp").and_then(|v| v.as_u64()) {
-                                let dt = chrono::DateTime::from_timestamp(exp as i64, 0);
-                                match dt {
-                                    Some(dt) => {
-                                        let now = chrono::Utc::now();
-                                        if dt > now {
-                                            let remaining = dt - now;
-                                            let hours = remaining.num_hours();
-                                            let mins = remaining.num_minutes() % 60;
-                                            println!("  Expires:   {} (in {}h {}m)", dt.format("%Y-%m-%d %H:%M:%S UTC"), hours, mins);
-                                        } else {
-                                            println!("  Expired:   {} (token has expired)", dt.format("%Y-%m-%d %H:%M:%S UTC"));
-                                        }
-                                    }
-                                    None => println!("  Expires:   timestamp={}", exp),
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            println!("  (Unable to decode token payload — use 'bosun login' to re-authenticate)");
-                        }
-                    }
-                    println!("  Token:     {}", BosunClient::credentials_path().display());
+                    println!("  Token file: {}", creds_path.display());
+                    println!("  Token algorithm: {:?}", token_data.alg);
                 }
             }
             None => {
@@ -853,7 +796,7 @@ impl Cli {
 
     async fn backup_create(&self, client: &mut BosunClient, app: &str) -> anyhow::Result<()> {
         if !self.json {
-            eprintln!("\u{1f4e6} Creating backup for '{app}'...");
+            eprintln!("📦 Creating backup for '{app}'...");
         }
 
         let response = client.create_backup(app).await?;
@@ -877,7 +820,7 @@ impl Cli {
             let size_mb = backup.size_bytes as f64 / 1_048_576.0;
             let ts = chrono_human(backup.timestamp_unix);
             println!(
-                "\u{2705} Backup '{}' created for '{}' ({} -- {:.1} MB)",
+                "✅ Backup '{}' created for '{}' ({} -- {:.1} MB)",
                 backup.id, backup.app_name, ts, size_mb
             );
         }
@@ -949,7 +892,7 @@ impl Cli {
         backup_id: &str,
     ) -> anyhow::Result<()> {
         if !self.json {
-            eprintln!("\u{1f504} Restoring backup '{backup_id}'...");
+            eprintln!("🔄 Restoring backup '{backup_id}'...");
         }
 
         let response = client.restore_backup(backup_id).await?;
@@ -966,7 +909,7 @@ impl Cli {
             );
         } else {
             println!(
-                "\u{2705} Backup '{backup_id}' restored successfully for app '{}' (status: {})",
+                "✅ Backup '{backup_id}' restored successfully for app '{}' (status: {})",
                 response.app_name, response.status
             );
         }
@@ -1116,6 +1059,11 @@ pub enum BackupCmd {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+/// Display helper for credentials path
+fn creds_path_display() -> String {
+    BosunClient::credentials_path().display().to_string()
+}
+
 /// Convert a DeployStrategy to a human-readable string.
 fn strategy_label(strategy: &DeployStrategy) -> &'static str {
     match strategy {
@@ -1127,7 +1075,6 @@ fn strategy_label(strategy: &DeployStrategy) -> &'static str {
 
 /// Convert a Unix timestamp (seconds) to a human-readable string.
 fn chrono_human(ts: u64) -> String {
-    // Simple formatting without pulling in chrono crate
     let secs = ts;
     let mins = secs / 60;
     let hours = mins / 60;
