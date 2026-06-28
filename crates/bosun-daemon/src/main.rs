@@ -6,19 +6,23 @@
 //!   - Metric collection and storage
 //!   - Reverse proxy config generation (nginx/caddy)
 //!   - SSL certificate management (Let's Encrypt)
+//!   - Webhook HTTP server for git push auto-deploy
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal;
 use tonic::transport::server::ServerTlsConfig;
 use tonic::transport::{Identity, Server};
 
 mod server;
 mod docker;
+mod health;
 mod metrics;
 mod proxy;
 mod persist;
 mod templates;
+mod webhook;
 
 /// Bosun daemon arguments.
 #[derive(Parser)]
@@ -39,6 +43,14 @@ struct Args {
     /// Data directory for persistent state
     #[arg(long, default_value = "/var/lib/bosun")]
     data_dir: String,
+
+    /// Webhook HTTP server listen address
+    #[arg(long, default_value = "0.0.0.0:9091", env = "BOSUN_WEBHOOK_LISTEN")]
+    webhook_listen: String,
+
+    /// Webhook shared secret for authentication
+    #[arg(long, env = "BOSUN_WEBHOOK_SECRET")]
+    webhook_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -70,8 +82,24 @@ async fn main() -> anyhow::Result<()> {
     // Connect to Docker
     let docker = docker::DockerClient::connect().await?;
 
+    // Clone DockerClient for the webhook server before moving the original
+    // into the shared Arc for gRPC + health checker.
+    let docker_webhook = docker.clone();
+
+    // Clone the inner bollard handle for metrics (needs a raw Docker ref).
+    let docker_inner = docker.inner.clone();
+
+    // Wrap DockerClient in Arc<Mutex<>> so it can be shared between
+    // the gRPC service and the health checker.
+    let docker_arc = Arc::new(tokio::sync::Mutex::new(docker));
+
+    // Start the health checker daemon (30s interval, rate-limited auto-restart).
+    let health_checker = health::HealthChecker::new(docker_arc.clone(), 30);
+    let restart_counts = health_checker.restart_counts.clone();
+    health_checker.start();
+
     // Create metric collector (shares the Docker connection)
-    let metrics = metrics::MetricCollector::new(docker.inner.clone());
+    let metrics = metrics::MetricCollector::new(docker_inner);
 
     // Create the gRPC service
     let proxy = match proxy::CaddyClient::new().await {
@@ -90,7 +118,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let bosun_service = server::BosunService::new(docker, metrics, store, proxy);
+    let bosun_service =
+        server::BosunService::new(docker_arc, metrics, store, proxy, restart_counts);
 
     // Build the gRPC server
     let addr = args.listen.parse()?;
@@ -112,6 +141,23 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("gRPC server listening on {}", args.listen);
 
+    // Start webhook HTTP server in a separate tokio task
+    let webhook_docker = Arc::new(tokio::sync::Mutex::new(docker_webhook));
+    let webhook_secret = args.webhook_secret.unwrap_or_default();
+    if webhook_secret.is_empty() {
+        tracing::warn!(
+            "Webhook secret not set — webhook auth is disabled (dev mode). \
+             Set --webhook-secret or BOSUN_WEBHOOK_SECRET for production."
+        );
+    }
+    let webhook_server =
+        webhook::WebhookServer::new(args.webhook_listen, webhook_docker, webhook_secret);
+    let webhook_handle = tokio::spawn(async move {
+        if let Err(e) = webhook_server.serve().await {
+            tracing::error!("Webhook server exited with error: {e}");
+        }
+    });
+
     // Graceful shutdown on SIGTERM/SIGINT
     let shutdown_signal = async {
         let _ = signal::ctrl_c().await;
@@ -121,6 +167,10 @@ async fn main() -> anyhow::Result<()> {
     router
         .serve_with_shutdown(addr, shutdown_signal)
         .await?;
+
+    // Cancel webhook server when gRPC shuts down
+    webhook_handle.abort();
+    tracing::info!("Webhook server stopped");
 
     tracing::info!("Server shut down gracefully");
     Ok(())

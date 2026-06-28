@@ -17,20 +17,24 @@ pub struct BosunService {
     pub metrics: std::sync::Arc<crate::metrics::MetricCollector>,
     pub store: std::sync::Arc<crate::persist::Store>,
     pub proxy: Option<std::sync::Arc<crate::proxy::CaddyClient>>,
+    /// Shared restart-count map populated by the health checker.
+    pub restart_counts: crate::health::RestartCounts,
 }
 
 impl BosunService {
     pub fn new(
-        docker: crate::docker::DockerClient,
+        docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
         metrics: crate::metrics::MetricCollector,
         store: crate::persist::Store,
         proxy: Option<crate::proxy::CaddyClient>,
+        restart_counts: crate::health::RestartCounts,
     ) -> Self {
         Self {
-            docker: std::sync::Arc::new(tokio::sync::Mutex::new(docker)),
+            docker,
             metrics: std::sync::Arc::new(metrics),
             store: std::sync::Arc::new(store),
             proxy: proxy.map(std::sync::Arc::new),
+            restart_counts,
         }
     }
 }
@@ -43,9 +47,19 @@ impl Bosun for BosunService {
     ) -> Result<Response<ListAppsResponse>, Status> {
         tracing::info!("list_apps called");
         let docker = self.docker.lock().await;
-        let apps = docker.list_bosun_apps().await.map_err(|e| {
+        let mut apps = docker.list_bosun_apps().await.map_err(|e| {
             Status::internal(format!("Failed to list containers: {}", e))
         })?;
+        drop(docker);
+
+        // Inject restart counts from the health checker.
+        let counts = self.restart_counts.lock().await;
+        for app in &mut apps {
+            if let Some(&c) = counts.get(&app.name) {
+                app.restart_count = c;
+            }
+        }
+
         Ok(Response::new(ListAppsResponse { apps }))
     }
 

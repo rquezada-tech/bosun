@@ -21,6 +21,7 @@ message App {
     optional uint32 port = 4;
     optional uint32 instances = 5;
     repeated string env_keys = 6;
+    uint32 restart_count = 7;
 }
 
 enum AppStatus {

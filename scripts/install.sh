@@ -37,10 +37,12 @@ BOSUN_CONFIG_DIR="${BOSUN_CONFIG_DIR:-/etc/bosun}"
 BOSUN_DATA_DIR="${BOSUN_DATA_DIR:-/var/lib/bosun}"
 BOSUN_CACHE_DIR="${BOSUN_CACHE_DIR:-/var/cache/bosun}"
 BOSUN_LISTEN_ADDR="${BOSUN_LISTEN_ADDR:-0.0.0.0:9090}"
+BOSUN_WEBHOOK_LISTEN="${BOSUN_WEBHOOK_LISTEN:-0.0.0.0:9091}"
 BOSUN_RUST_LOG="${BOSUN_RUST_LOG:-bosun_daemon=info}"
 
 CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
 KEY_FILE="${BOSUN_CONFIG_DIR}/server.key"
+WEBHOOK_SECRET_FILE="${BOSUN_CONFIG_DIR}/webhook-secret"
 BUILD_DIR="$(mktemp -d /tmp/bosun-build.XXXXXX)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
@@ -277,8 +279,21 @@ if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
     warn "  $KEY_FILE"
 fi
 
-# ── Step 9: Create systemd service ────────────────────────────────────────────
-header "Step 9/11: Creating systemd service"
+# ── Step 9: Generate webhook secret ────────────────────────────────────────────
+header "Step 9/12: Generating webhook secret"
+
+if [ -f "$WEBHOOK_SECRET_FILE" ]; then
+    info "Webhook secret already exists at $WEBHOOK_SECRET_FILE"
+else
+    info "Generating random webhook secret..."
+    openssl rand -hex 32 > "$WEBHOOK_SECRET_FILE"
+    chmod 0600 "$WEBHOOK_SECRET_FILE"
+    chown "${BOSUN_USER}:${BOSUN_USER}" "$WEBHOOK_SECRET_FILE" 2>/dev/null || true
+    info "Webhook secret generated and saved to $WEBHOOK_SECRET_FILE"
+fi
+
+# ── Step 10: Create systemd service ────────────────────────────────────────────
+header "Step 10/12: Creating systemd service"
 
 # Create bosun system user if it doesn't exist
 if ! id -u "$BOSUN_USER" &>/dev/null; then
@@ -319,7 +334,9 @@ ExecStart=${BOSUN_BIN_DIR}/bosun-daemon \\
     --listen ${BOSUN_LISTEN_ADDR} \\
     --data-dir ${BOSUN_DATA_DIR} \\
     --cert ${CERT_FILE} \\
-    --key ${KEY_FILE}
+    --key ${KEY_FILE} \\
+    --webhook-listen ${BOSUN_WEBHOOK_LISTEN} \\
+    --webhook-secret \$(cat ${WEBHOOK_SECRET_FILE})
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=${BOSUN_RUST_LOG}
@@ -345,8 +362,8 @@ chmod 0644 "$SERVICE_FILE"
 # Reload systemd
 systemctl daemon-reload
 
-# ── Step 10: Enable and start the service ──────────────────────────────────────
-header "Step 10/11: Enabling and starting bosun-daemon"
+# ── Step 11: Enable and start the service ──────────────────────────────────────
+header "Step 11/12: Enabling and starting bosun-daemon"
 
 systemctl enable bosun-daemon.service
 

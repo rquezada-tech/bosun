@@ -22,6 +22,14 @@ pub struct DockerClient {
     pub inner: Docker,
 }
 
+impl Clone for DockerClient {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl DockerClient {
     pub async fn connect() -> anyhow::Result<Self> {
         let docker = Docker::connect_with_local_defaults()?;
@@ -61,6 +69,10 @@ impl DockerClient {
                 let labels = c.labels.unwrap_or_default();
                 let domain = labels.get("bosun.domain").cloned();
                 let port = labels.get("bosun.port").and_then(|p| p.parse().ok());
+                let restart_count = labels
+                    .get("bosun.restart-count")
+                    .and_then(|c| c.parse().ok())
+                    .unwrap_or(0);
 
                 Some(App {
                     name,
@@ -69,6 +81,7 @@ impl DockerClient {
                     port,
                     instances: Some(1),
                     env_keys: vec![],
+                    restart_count,
                 })
             })
             .collect();
@@ -257,6 +270,7 @@ impl DockerClient {
             labels.insert("bosun.domain".to_string(), d.to_string());
         }
         labels.insert("bosun.port".to_string(), port.to_string());
+        labels.insert("bosun.health-check".to_string(), "true".to_string());
 
         // Convert env_vars to "KEY=VALUE" strings
         let env: Vec<String> = env_vars
@@ -395,6 +409,7 @@ impl DockerClient {
             labels.insert("bosun.domain".to_string(), d.to_string());
         }
         labels.insert("bosun.port".to_string(), port.to_string());
+        labels.insert("bosun.health-check".to_string(), "true".to_string());
 
         // 7. Create container config using the template image directly
         let config = Config {
@@ -483,6 +498,161 @@ impl DockerClient {
             container_name,
             timeout_secs
         );
+    }
+    /// Inspect a container by name and return full Docker inspect info.
+    pub async fn inspect_container(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<bollard::models::ContainerInspectResponse> {
+        Ok(self.inner.inspect_container(name, None).await?)
+    }
+
+    /// Redeploy an existing app: pull latest image, stop old container,
+    /// recreate with the same configuration, and start it.
+    pub async fn redeploy(&self, app_name: &str) -> anyhow::Result<()> {
+        tracing::info!("Redeploying app '{}'...", app_name);
+
+        // 1. Inspect current container to capture its config
+        let inspect = self.inner.inspect_container(app_name, None).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot find container '{}' for redeploy: {}",
+                app_name,
+                e
+            )
+        })?;
+
+        let config = inspect.config.ok_or_else(|| {
+            anyhow::anyhow!("Container '{}' has no config in inspect response", app_name)
+        })?;
+
+        let host_config = inspect.host_config.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Container '{}' has no host config in inspect response",
+                app_name
+            )
+        })?;
+
+        // Extract image name
+        let image = config.image.ok_or_else(|| {
+            anyhow::anyhow!("Container '{}' has no image set", app_name)
+        })?;
+        tracing::info!("Redeploy: current image '{}'", image);
+
+        // 2. Pull latest image
+        tracing::info!("Pulling latest image '{}'...", image);
+        let mut pull_stream = self.inner.create_image(
+            Some(bollard::image::CreateImageOptions {
+                from_image: image.clone(),
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        while let Some(result) = pull_stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(status) = &info.status {
+                        tracing::debug!("pull: {}", status);
+                    }
+                    if let Some(error) = &info.error {
+                        tracing::warn!("Pull warning for '{}': {}", image, error.trim());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Pull stream error for '{}': {} (continuing)", image, e);
+                }
+            }
+        }
+        tracing::info!("Image '{}' pull completed", image);
+
+        // 3. Stop old container
+        match self
+            .inner
+            .stop_container(app_name, Some(StopContainerOptions { t: 10 }))
+            .await
+        {
+            Ok(_) => tracing::info!("Stopped container '{}'", app_name),
+            Err(e) => tracing::warn!(
+                "Failed to stop container '{}': {} (continuing)",
+                app_name,
+                e
+            ),
+        }
+
+        // 4. Remove old container
+        match self
+            .inner
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("Removed container '{}'", app_name),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to remove container '{}': {}",
+                    app_name,
+                    e
+                ));
+            }
+        }
+
+        // 5. Recreate container with same config
+        let labels = config.labels.unwrap_or_default();
+
+        // Build volume binds from host config
+        let binds: Vec<String> = host_config
+            .binds
+            .clone()
+            .unwrap_or_default();
+
+        // Build port bindings
+        let port_bindings = host_config.port_bindings.clone();
+
+        // Build exposed ports
+        let exposed_ports = config.exposed_ports.clone();
+
+        let recreate_config = Config {
+            image: Some(image.clone()),
+            env: config.env.clone(),
+            labels: Some(labels),
+            exposed_ports,
+            host_config: Some(HostConfig {
+                port_bindings,
+                binds: Some(binds),
+                restart_policy: Some(bollard::models::RestartPolicy {
+                    name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: Some(3),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let create_options = CreateContainerOptions {
+            name: app_name.to_string(),
+            ..Default::default()
+        };
+
+        tracing::info!("Recreating container '{}' with image '{}'...", app_name, image);
+        let container = self.inner.create_container(Some(create_options), recreate_config).await?;
+        tracing::info!(
+            "Container '{}' recreated (id={})",
+            app_name,
+            container.id
+        );
+
+        // 6. Start container
+        self.inner
+            .start_container::<String>(app_name, None)
+            .await?;
+        tracing::info!("Container '{}' started successfully (redeploy complete)", app_name);
+
+        Ok(())
     }
 }
 

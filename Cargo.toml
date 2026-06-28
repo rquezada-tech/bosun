@@ -57,6 +57,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # Templating (config files, nginx config generation)
 tera = "1"
 
+# HTTP webhook server
+axum = "0.8"
+
 # Stream utilities (for Docker build output + metrics streaming)
 futures-util = "0.3"
 tokio-stream = "0.1"
