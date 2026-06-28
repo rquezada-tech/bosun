@@ -7,7 +7,7 @@ pub mod v1 {
 }
 
 use std::pin::Pin;
-use v1::bosun_server::{Bosun, BosunServer};
+use v1::bosun_server::Bosun;
 use v1::*;
 use tonic::{Request, Response, Status};
 use tokio_stream::Stream;
@@ -49,23 +49,72 @@ impl Bosun for BosunService {
     type GetAppLogsStream = Pin<Box<dyn Stream<Item = Result<LogEntry, Status>> + Send + 'static>>;
     async fn get_app_logs(
         &self,
-        _request: Request<GetAppLogsRequest>,
+        request: Request<GetAppLogsRequest>,
     ) -> Result<Response<Self::GetAppLogsStream>, Status> {
-        todo!("get_app_logs")
+        let req = request.into_inner();
+        let follow = req.follow;
+        let tail_lines = req.tail_lines;
+
+        tracing::info!(
+            "get_app_logs called for {} (follow={}, tail={})",
+            req.app_name,
+            follow,
+            tail_lines
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LogEntry, Status>>(32);
+
+        let docker = self.docker.clone();
+        let app_name = req.app_name.clone();
+
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let stream = {
+                let client = docker.lock().await;
+                client.get_logs(&app_name, follow, tail_lines)
+            };
+            tokio::pin!(stream);
+            while let Some(result) = stream.next().await {
+                let item = match result {
+                    Ok(entry) => Ok(entry),
+                    Err(e) => Err(Status::internal(format!("Log error: {}", e))),
+                };
+                if tx.send(item).await.is_err() {
+                    break; // client disconnected
+                }
+            }
+        });
+
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream)))
     }
 
     async fn restart_app(
         &self,
-        _request: Request<RestartAppRequest>,
+        request: Request<RestartAppRequest>,
     ) -> Result<Response<RestartAppResponse>, Status> {
-        todo!("restart_app")
+        let req = request.into_inner();
+        tracing::info!("restart_app called for {}", req.app_name);
+        let docker = self.docker.lock().await;
+        docker
+            .restart_container(&req.app_name)
+            .await
+            .map_err(|e| Status::internal(format!("Restart failed: {}", e)))?;
+        Ok(Response::new(RestartAppResponse {}))
     }
 
     async fn scale_app(
         &self,
-        _request: Request<ScaleAppRequest>,
+        request: Request<ScaleAppRequest>,
     ) -> Result<Response<ScaleAppResponse>, Status> {
-        todo!("scale_app")
+        let req = request.into_inner();
+        tracing::info!("scale_app called for {} to {} instances", req.app_name, req.instances);
+        let docker = self.docker.lock().await;
+        docker
+            .scale_app(&req.app_name, req.instances)
+            .await
+            .map_err(|e| Status::invalid_argument(format!("Scale failed: {}", e)))?;
+        Ok(Response::new(ScaleAppResponse {}))
     }
 
     async fn deploy(

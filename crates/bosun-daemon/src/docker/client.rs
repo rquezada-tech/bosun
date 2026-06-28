@@ -85,6 +85,7 @@ impl DockerClient {
     }
 
     /// Stop a container by name.
+    #[allow(dead_code)] // used in Phase 2 (manual stop command)
     pub async fn stop_container(&self, name: &str) -> anyhow::Result<()> {
         tracing::info!("Stopping container: {}", name);
         let options = StopContainerOptions { t: 10 };
@@ -99,7 +100,9 @@ impl DockerClient {
         name: &str,
         follow: bool,
         tail_lines: u32,
-    ) -> impl futures_util::Stream<Item = anyhow::Result<LogEntry>> {
+    ) -> impl futures_util::Stream<Item = anyhow::Result<LogEntry>> + use<> {
+        let docker = self.inner.clone();
+        let name = name.to_string();
         let options = LogsOptions {
             follow,
             stdout: true,
@@ -109,7 +112,7 @@ impl DockerClient {
             ..Default::default()
         };
 
-        let stream = self.inner.logs(name, Some(options));
+        let stream = docker.logs(&name, Some(options));
 
         stream.map(|result| match result {
             Ok(log_output) => {

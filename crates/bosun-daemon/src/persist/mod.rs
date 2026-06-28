@@ -1,6 +1,7 @@
 //! Persistent state storage via SQLite.
 //!
 //! Stores: metric history, environment variables, daemon configuration.
+#![allow(dead_code)] // MVP: some methods used in Phase 2
 
 use std::collections::HashMap;
 use std::path::Path;
