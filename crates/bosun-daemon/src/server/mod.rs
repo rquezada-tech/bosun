@@ -150,6 +150,71 @@ impl Bosun for BosunService {
 
         let env_vars: std::collections::HashMap<String, String> = req.env;
 
+        // Check if context_path is a known built-in template name
+        // If so, use template deploy (no Dockerfile needed).
+        if let Some(template) = crate::templates::get_template(&app_name) {
+            tracing::info!(
+                "Deploy request: template={}, app={}, domain={:?}, port={}, ssl={}",
+                template.name,
+                app_name,
+                domain,
+                port,
+                enable_ssl
+            );
+
+            let docker = self.docker.lock().await;
+            let port_override = if req.port.is_some() {
+                Some(port)
+            } else {
+                None // use template default
+            };
+
+            docker
+                .deploy_template(template, &app_name, domain, port_override)
+                .await
+                .map_err(|e| Status::internal(format!("Template deploy failed: {}", e)))?;
+
+            // Health check
+            tracing::info!(
+                "Waiting up to 30s for container '{}' to become healthy...",
+                app_name
+            );
+            docker
+                .wait_for_container_healthy(&app_name, 30)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!(
+                        "Container '{}' failed health check: {}. Check container logs for details.",
+                        app_name, e
+                    ))
+                })?;
+
+            // Persist app metadata and env vars
+            let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
+
+            // Configure Caddy reverse proxy if domain was provided
+            if let (Some(domain), Some(proxy)) = (domain, &self.proxy) {
+                tracing::info!(
+                    "Configuring Caddy reverse proxy: {} -> localhost:{}",
+                    domain,
+                    port
+                );
+                if let Err(e) = proxy.configure_app(domain, port).await {
+                    tracing::error!(
+                        "Failed to configure Caddy proxy for {}: {}. Container is running but won't receive HTTP traffic via domain.",
+                        domain,
+                        e
+                    );
+                }
+            }
+
+            return Ok(Response::new(DeployResponse {
+                app_name,
+                status: "deployed".to_string(),
+            }));
+        }
+
+        // Not a template — use the existing build-from-directory flow
         tracing::info!(
             "Deploy request: app={}, path={}, domain={:?}, port={}, ssl={}",
             app_name,
@@ -323,5 +388,22 @@ impl Bosun for BosunService {
             .unset_app_env(&req.app_name, &req.key)
             .map_err(|e| Status::internal(format!("Failed to unset env: {}", e)))?;
         Ok(Response::new(UnsetEnvResponse {}))
+    }
+
+    async fn list_templates(
+        &self,
+        _request: Request<ListTemplatesRequest>,
+    ) -> Result<Response<ListTemplatesResponse>, Status> {
+        tracing::info!("list_templates called");
+        let templates = crate::templates::list_templates()
+            .iter()
+            .map(|t| TemplateInfo {
+                name: t.name.to_string(),
+                description: t.description.to_string(),
+                category: t.category.as_str().to_string(),
+                default_port: t.default_port as u32,
+            })
+            .collect();
+        Ok(Response::new(ListTemplatesResponse { templates }))
     }
 }

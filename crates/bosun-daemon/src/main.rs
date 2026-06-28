@@ -18,6 +18,7 @@ mod docker;
 mod metrics;
 mod proxy;
 mod persist;
+mod templates;
 
 /// Bosun daemon arguments.
 #[derive(Parser)]

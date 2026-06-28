@@ -80,6 +80,9 @@ service Bosun {
     rpc GetEnv(GetEnvRequest) returns (GetEnvResponse);
     rpc SetEnv(SetEnvRequest) returns (SetEnvResponse);
     rpc UnsetEnv(UnsetEnvRequest) returns (UnsetEnvResponse);
+
+    // One-click app templates
+    rpc ListTemplates(ListTemplatesRequest) returns (ListTemplatesResponse);
 }
 
 // --- Request / Response messages ---
@@ -135,3 +138,18 @@ message UnsetEnvRequest {
     string key = 2;
 }
 message UnsetEnvResponse {}
+
+// --- Template messages ---
+
+message TemplateInfo {
+    string name = 1;
+    string description = 2;
+    string category = 3;
+    uint32 default_port = 4;
+}
+
+message ListTemplatesRequest {}
+
+message ListTemplatesResponse {
+    repeated TemplateInfo templates = 1;
+}

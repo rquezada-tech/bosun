@@ -15,6 +15,7 @@ use bollard::image::BuildImageOptions;
 use bollard::models::{HostConfig, PortBinding};
 use bollard::secret::ContainerSummary;
 use crate::server::v1::{App, AppStatus, LogEntry};
+use crate::templates::Template;
 use futures_util::StreamExt;
 
 pub struct DockerClient {
@@ -287,6 +288,147 @@ impl DockerClient {
         // 5. Create and start container
         tracing::info!("Creating container '{}'...", app_name);
         let container = self.inner.create_container(Some(create_options), config).await?;
+        tracing::info!("Container '{}' created (id={})", app_name, container.id);
+
+        self.inner.start_container::<String>(app_name, None).await?;
+        tracing::info!("Container '{}' started successfully", app_name);
+
+        Ok(())
+    }
+
+    /// Deploy an app from a built-in template (no Dockerfile needed).
+    /// Pulls the Docker image, creates required directories, and starts
+    /// the container with the template's pre-configured env vars, volumes,
+    /// and port.
+    pub async fn deploy_template(
+        &self,
+        template: &Template,
+        app_name: &str,
+        domain: Option<&str>,
+        port_override: Option<u16>,
+    ) -> anyhow::Result<()> {
+        let port = port_override.unwrap_or(template.default_port);
+
+        tracing::info!(
+            "Deploying template '{}' as app '{}' (image={}, domain={:?}, port={})",
+            template.name,
+            app_name,
+            template.image,
+            domain,
+            port
+        );
+
+        // 1. Create host directories for volume mounts and resolve {name} placeholders
+        for (host_src, _container_dest) in &template.volumes {
+            let host_path = host_src.replace("{name}", app_name);
+            std::fs::create_dir_all(&host_path)?;
+            tracing::debug!("Created volume host directory: {}", host_path);
+        }
+
+        // 2. Remove old container if it exists
+        match self
+            .inner
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("Removed existing container '{}'", app_name),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
+                tracing::debug!("No existing container '{}' to remove", app_name);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to remove old container '{}': {} (continuing)",
+                    app_name,
+                    e
+                );
+            }
+        }
+
+        // 3. Build env vars with {name} placeholders resolved
+        let env: Vec<String> = template
+            .env_vars
+            .iter()
+            .map(|(k, v)| {
+                let resolved = v.replace("{name}", app_name);
+                format!("{}={}", k, resolved)
+            })
+            .collect();
+
+        // 4. Build volume binds (host:container:rw)
+        let binds: Vec<String> = template
+            .volumes
+            .iter()
+            .map(|(host_src, container_dest)| {
+                let host_path = host_src.replace("{name}", app_name);
+                format!("{}:{}:rw", host_path, container_dest)
+            })
+            .collect();
+
+        // 5. Port mapping
+        let port_binding = format!("{}/tcp", port);
+        let mut exposed_ports = HashMap::new();
+        exposed_ports.insert(port_binding.clone(), HashMap::new());
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            port_binding.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(port.to_string()),
+            }]),
+        );
+
+        // 6. Labels
+        let mut labels = HashMap::new();
+        labels.insert("managed-by".to_string(), "bosun".to_string());
+        labels.insert("bosun.app".to_string(), app_name.to_string());
+        labels.insert("bosun.template".to_string(), template.name.to_string());
+        if let Some(d) = domain {
+            labels.insert("bosun.domain".to_string(), d.to_string());
+        }
+        labels.insert("bosun.port".to_string(), port.to_string());
+
+        // 7. Create container config using the template image directly
+        let config = Config {
+            image: Some(template.image.to_string()),
+            exposed_ports: Some(exposed_ports),
+            env: Some(env),
+            labels: Some(labels),
+            host_config: Some(HostConfig {
+                port_bindings: Some(port_bindings),
+                binds: Some(binds),
+                restart_policy: Some(bollard::models::RestartPolicy {
+                    name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: Some(3),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let create_options = CreateContainerOptions {
+            name: app_name.to_string(),
+            ..Default::default()
+        };
+
+        // 8. Create and start container (Docker auto-pulls the image if missing)
+        tracing::info!(
+            "Creating container '{}' from image '{}'...",
+            app_name,
+            template.image
+        );
+        let container = self
+            .inner
+            .create_container(Some(create_options), config)
+            .await?;
         tracing::info!("Container '{}' created (id={})", app_name, container.id);
 
         self.inner.start_container::<String>(app_name, None).await?;

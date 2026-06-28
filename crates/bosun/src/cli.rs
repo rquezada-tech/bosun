@@ -103,6 +103,11 @@ impl Cli {
             }
             AppsCmd::Restart { app } => self.apps_restart(client, app).await,
             AppsCmd::Scale { app, instances } => self.apps_scale(client, app, *instances).await,
+            AppsCmd::Templates => self.apps_templates(client).await,
+            AppsCmd::Create {
+                template_name,
+                name,
+            } => self.apps_create(client, template_name, name.as_deref()).await,
         }
     }
 
@@ -228,6 +233,116 @@ impl Cli {
             }))?);
         } else {
             println!("✔ App '{app}' scaled to {instances} instance(s).");
+        }
+        Ok(())
+    }
+
+    // ── One-Click Apps ─────────────────────────────────────────────
+
+    /// List available one-click app templates.
+    async fn apps_templates(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let templates = client.list_templates().await?;
+
+        if self.json {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "templates": templates.iter().map(|t| serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "category": t.category,
+                    "default_port": t.default_port,
+                })).collect::<Vec<_>>(),
+            }))?;
+            println!("{json}");
+            return Ok(());
+        }
+
+        if templates.is_empty() {
+            println!("No templates available.");
+            return Ok(());
+        }
+
+        use tabled::{Table, Tabled};
+        #[derive(Tabled)]
+        struct TemplateRow {
+            #[tabled(rename = "NAME")]
+            name: String,
+            #[tabled(rename = "DESCRIPTION")]
+            description: String,
+            #[tabled(rename = "CATEGORY")]
+            category: String,
+            #[tabled(rename = "PORT")]
+            port: String,
+        }
+
+        let rows: Vec<TemplateRow> = templates
+            .iter()
+            .map(|t| TemplateRow {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                category: t.category.clone(),
+                port: t.default_port.to_string(),
+            })
+            .collect();
+
+        let table = Table::new(rows);
+        println!("{table}");
+        Ok(())
+    }
+
+    /// Create an app from a one-click template.
+    async fn apps_create(
+        &self,
+        client: &mut BosunClient,
+        template_name: &str,
+        name_override: Option<&str>,
+    ) -> anyhow::Result<()> {
+        // Validate template exists by listing templates
+        let templates = client.list_templates().await?;
+        let template = templates
+            .iter()
+            .find(|t| t.name == template_name);
+
+        if template.is_none() {
+            let available: Vec<&str> = templates.iter().map(|t| t.name.as_str()).collect();
+            anyhow::bail!(
+                "Unknown template '{}'. Available templates: {}\n\
+                 Run 'bosun apps templates' to see the full list with descriptions.",
+                template_name,
+                available.join(", ")
+            );
+        }
+
+        let template = template.unwrap();
+        let app_name = name_override.unwrap_or(template_name);
+
+        if !self.json {
+            eprintln!(
+                "🚀 Creating '{}' from template '{}' (port: {})...",
+                app_name, template_name, template.default_port
+            );
+        }
+
+        let response = client
+            .deploy(
+                template_name,
+                None,
+                false,
+                std::collections::HashMap::new(),
+                Some(template.default_port),
+            )
+            .await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "app_name": response.app_name,
+                "template": template_name,
+                "status": response.status,
+            }))?);
+        } else {
+            println!(
+                "✔ Created '{}' from template '{}' successfully (status: {})",
+                response.app_name, template_name, response.status
+            );
         }
         Ok(())
     }
@@ -545,6 +660,16 @@ pub enum AppsCmd {
     Restart { app: String },
     /// Scale an app to N instances
     Scale { app: String, instances: u32 },
+    /// Create an app from a one-click template (e.g., redis, postgres)
+    Create {
+        /// Template name (use 'bosun apps templates' to list)
+        template_name: String,
+        /// Custom app name (defaults to template name if omitted)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List available one-click app templates
+    Templates,
 }
 
 #[derive(Subcommand)]

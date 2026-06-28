@@ -233,4 +233,17 @@ impl BosunClient {
             .context(format!("gRPC UnsetEnv failed for '{app_name}': {key}"))?;
         Ok(())
     }
+
+    // ── Templates ──────────────────────────────────────────────────
+
+    /// List available one-click app templates.
+    pub async fn list_templates(&mut self) -> anyhow::Result<Vec<TemplateInfo>> {
+        let response = self
+            .inner
+            .list_templates(ListTemplatesRequest {})
+            .await
+            .context("gRPC ListTemplates failed")?
+            .into_inner();
+        Ok(response.templates)
+    }
 }
