@@ -100,17 +100,41 @@ $ bosun apps logs worker --follow
 - **Client:** macOS or Linux with the `bosun` binary
 - **Network:** The daemon port (default `9090`) accessible from your client
 
-### Install
+### Install (one command)
 
-**From source (recommended for now):**
+The fastest way to get a fresh Ubuntu/Debian VPS running Bosun:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash
+```
+
+This single command:
+- Installs Docker Engine (if not present)
+- Installs the Rust toolchain
+- Clones and builds `bosun-daemon` from source
+- Creates `/etc/bosun/` with a self-signed TLS certificate
+- Sets up a `systemd` service (auto-start, auto-restart)
+- Opens port `9090/tcp` in `ufw`
+
+After it finishes, install the CLI on your **local machine**:
+
+```bash
+cargo install --git https://github.com/rquezada-tech/bosun.git bosun
+```
+
+> **Note:** The install script is idempotent — safe to re-run. It skips steps that are already done.
+
+### Install from source (for developers)
 
 ```bash
 git clone https://github.com/rquezada-tech/bosun.git
 cd bosun
 
-# Install both binaries
-cargo install --path crates/bosun
-cargo install --path crates/bosun-daemon
+# Build everything
+cargo build --workspace
+
+# Run the daemon directly
+cargo run --bin bosun-daemon -- --listen 0.0.0.0:9090 --data-dir /var/lib/bosun
 ```
 
 Pre-built binaries will be available once we hit v0.1.0.
@@ -120,7 +144,11 @@ Pre-built binaries will be available once we hit v0.1.0.
 On your server:
 
 ```bash
-bosun-daemon --listen 0.0.0.0:9090 --data-dir /var/lib/bosun
+# If installed via the one-command script:
+systemctl start bosun-daemon
+
+# Or run directly:
+bosun-daemon --listen 0.0.0.0:9090 --data-dir /var/lib/bosun --cert /etc/bosun/server.crt --key /etc/bosun/server.key
 ```
 
 ### Connect and deploy
