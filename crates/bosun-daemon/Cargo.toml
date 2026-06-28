@@ -28,6 +28,7 @@ tera.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 futures-util.workspace = true
+tokio-stream.workspace = true
 tar.workspace = true
 
 # Uncomment when ready

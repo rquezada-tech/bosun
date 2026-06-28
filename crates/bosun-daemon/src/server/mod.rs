@@ -6,22 +6,27 @@ pub mod v1 {
     tonic::include_proto!("bosun.v1");
 }
 
+use std::pin::Pin;
 use v1::bosun_server::{Bosun, BosunServer};
 use v1::*;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
+use tokio_stream::Stream;
 
 pub struct BosunService {
     pub docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
+    pub metrics: std::sync::Arc<crate::metrics::MetricCollector>,
     pub store: std::sync::Arc<crate::persist::Store>,
 }
 
 impl BosunService {
     pub fn new(
         docker: crate::docker::DockerClient,
+        metrics: crate::metrics::MetricCollector,
         store: crate::persist::Store,
     ) -> Self {
         Self {
             docker: std::sync::Arc::new(tokio::sync::Mutex::new(docker)),
+            metrics: std::sync::Arc::new(metrics),
             store: std::sync::Arc::new(store),
         }
     }
@@ -33,6 +38,7 @@ impl Bosun for BosunService {
         &self,
         _request: Request<ListAppsRequest>,
     ) -> Result<Response<ListAppsResponse>, Status> {
+        tracing::info!("list_apps called");
         let docker = self.docker.lock().await;
         let apps = docker.list_bosun_apps().await.map_err(|e| {
             Status::internal(format!("Failed to list containers: {}", e))
@@ -40,12 +46,12 @@ impl Bosun for BosunService {
         Ok(Response::new(ListAppsResponse { apps }))
     }
 
-    type GetAppLogsStream = tonic::codec::Streaming<LogEntry>;
+    type GetAppLogsStream = Pin<Box<dyn Stream<Item = Result<LogEntry, Status>> + Send + 'static>>;
     async fn get_app_logs(
         &self,
         _request: Request<GetAppLogsRequest>,
     ) -> Result<Response<Self::GetAppLogsStream>, Status> {
-        todo!("get_app_logs — Task 3/5")
+        todo!("get_app_logs")
     }
 
     async fn restart_app(
@@ -106,17 +112,73 @@ impl Bosun for BosunService {
 
     async fn get_metrics(
         &self,
-        _request: Request<GetMetricsRequest>,
+        request: Request<GetMetricsRequest>,
     ) -> Result<Response<GetMetricsResponse>, Status> {
-        todo!("get_metrics — Task 4")
+        let req = request.into_inner();
+        tracing::info!("get_metrics called for {:?}", req.app_name);
+
+        if let Some(app_name) = &req.app_name {
+            // Single app snapshot
+            let metric = self.metrics.get_snapshot(app_name).await.map_err(|e| {
+                Status::internal(format!("Metrics error: {}", e))
+            })?;
+            Ok(Response::new(GetMetricsResponse {
+                metrics: vec![metric],
+            }))
+        } else {
+            // All apps — get list then snapshot each
+            let docker = self.docker.lock().await;
+            let apps = docker.list_bosun_apps().await.map_err(|e| {
+                Status::internal(format!("Failed to list containers: {}", e))
+            })?;
+
+            let mut metrics = Vec::new();
+            for app in &apps {
+                if app.status() == AppStatus::Running {
+                    match self.metrics.get_snapshot(&app.name).await {
+                        Ok(m) => metrics.push(m),
+                        Err(e) => {
+                            tracing::warn!("Failed to get metrics for {}: {}", app.name, e);
+                        }
+                    }
+                }
+            }
+            Ok(Response::new(GetMetricsResponse { metrics }))
+        }
     }
 
-    type StreamMetricsStream = tonic::codec::Streaming<AppMetric>;
+    type StreamMetricsStream = Pin<Box<dyn Stream<Item = Result<AppMetric, Status>> + Send + 'static>>;
     async fn stream_metrics(
         &self,
-        _request: Request<GetMetricsRequest>,
+        request: Request<GetMetricsRequest>,
     ) -> Result<Response<Self::StreamMetricsStream>, Status> {
-        todo!("stream_metrics — Task 4")
+        let req = request.into_inner();
+        let app_name = req.app_name.ok_or_else(|| {
+            Status::invalid_argument("app_name is required for streaming metrics")
+        })?;
+
+        tracing::info!("stream_metrics called for {}", app_name);
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AppMetric, Status>>(32);
+        let metrics = self.metrics.clone();
+        let name = app_name.clone();
+
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut stream = metrics.stream_live(&name);
+            while let Some(result) = stream.next().await {
+                let item = match result {
+                    Ok(metric) => Ok(metric),
+                    Err(e) => Err(Status::internal(format!("Stream error: {}", e))),
+                };
+                if tx.send(item).await.is_err() {
+                    break; // client disconnected
+                }
+            }
+        });
+
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream)))
     }
 
     async fn get_env(

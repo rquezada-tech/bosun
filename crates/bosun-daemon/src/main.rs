@@ -69,8 +69,11 @@ async fn main() -> anyhow::Result<()> {
     // Connect to Docker
     let docker = docker::DockerClient::connect().await?;
 
+    // Create metric collector (shares the Docker connection)
+    let metrics = metrics::MetricCollector::new(docker.inner.clone());
+
     // Create the gRPC service
-    let bosun_service = server::BosunService::new(docker, store);
+    let bosun_service = server::BosunService::new(docker, metrics, store);
 
     // Build the gRPC server
     let addr = args.listen.parse()?;
