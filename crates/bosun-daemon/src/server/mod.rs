@@ -12,12 +12,17 @@ use tonic::{Request, Response, Status, Streaming};
 
 pub struct BosunService {
     pub docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
+    pub store: std::sync::Arc<crate::persist::Store>,
 }
 
 impl BosunService {
-    pub fn new(docker: crate::docker::DockerClient) -> Self {
+    pub fn new(
+        docker: crate::docker::DockerClient,
+        store: crate::persist::Store,
+    ) -> Self {
         Self {
             docker: std::sync::Arc::new(tokio::sync::Mutex::new(docker)),
+            store: std::sync::Arc::new(store),
         }
     }
 }

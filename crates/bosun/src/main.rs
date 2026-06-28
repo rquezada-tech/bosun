@@ -7,9 +7,11 @@
 //!   env set|list APP KEY [VALUE]
 //!   config show|set
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
 mod cli;
+mod client;
+mod proto;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

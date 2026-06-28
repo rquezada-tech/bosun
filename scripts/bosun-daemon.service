@@ -1,0 +1,34 @@
+[Unit]
+Description=Bosun PaaS Daemon
+Documentation=https://github.com/rquezada-tech/bosun
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=bosun
+Group=bosun
+ExecStart=/usr/local/bin/bosun-daemon \
+    --listen 0.0.0.0:9090 \
+    --data-dir /var/lib/bosun \
+    --cert /etc/bosun/server.crt \
+    --key /etc/bosun/server.key
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=bosun_daemon=info
+
+# Sandboxing / hardening
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/bosun /var/cache/bosun /etc/bosun
+ReadOnlyPaths=/etc/ssl/certs
+
+# Limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

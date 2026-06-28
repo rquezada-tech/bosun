@@ -26,6 +26,8 @@ rusqlite.workspace = true
 tera.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
+futures-util.workspace = true
+tar.workspace = true
 
 # Uncomment when ready
 # instant-acme.workspace = true
