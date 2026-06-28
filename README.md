@@ -88,6 +88,7 @@ $ bosun apps create redis
 
 - [ ] `bosun deploy` — build and run containers from a Dockerfile or compose file
 - [ ] `bosun apps list|logs|restart|scale` — full application lifecycle
+- [x] `bosun apps create <template>` and `bosun apps templates` — deploy one-click apps (Redis, Postgres, MySQL, MongoDB, Nginx)
 - [ ] `bosun metrics` — real-time CPU, RAM, network per container
 - [ ] `bosun env` — environment variable management
 - [ ] `bosun config` — daemon configuration from the CLI
@@ -97,7 +98,6 @@ $ bosun apps create redis
 ### Planned
 
 - [ ] Reverse proxy auto-configuration (Caddy integration)
-- [ ] One-click app templates (deploy Redis, Postgres, etc. with one command)
 - [ ] Health checks and auto-restart
 - [ ] Webhook triggers (deploy on `git push`)
 - [ ] Docker Swarm multi-node support
@@ -183,6 +183,10 @@ bosun deploy ./my-node-app --domain api.my-site.com --ssl
 
 # Check it's running
 bosun apps list
+
+# Deploy a one-click app (Redis, Postgres, MySQL, MongoDB, Nginx)
+bosun apps templates              # see available templates
+bosun apps create redis           # spin up Redis in seconds
 
 # Watch live metrics
 bosun metrics my-node-app --live
