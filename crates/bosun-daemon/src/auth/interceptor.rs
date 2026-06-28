@@ -1,12 +1,16 @@
 //! gRPC auth interceptor.
 //!
-//! Validates JWT tokens on every request that includes an Authorization header.
-//! Requests without a token (like Login) pass through unauthenticated.
+//! Extracts and validates JWT tokens from requests. If a token is present
+//! it is validated and claims are injected into request extensions.
+//! Requests without a token pass through — each handler is responsible
+//! for enforcing its own authentication requirements via get_claims() or
+//! require_admin() helpers.
 
 use crate::auth::AuthService;
 use crate::auth::Claims;
 use std::sync::Arc;
 use tonic::{Request, Status};
+
 pub fn create_interceptor(
     auth_service: Arc<AuthService>,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone {
@@ -15,9 +19,9 @@ pub fn create_interceptor(
         let token = match extract_bearer_token(request.metadata()) {
             Some(t) => t,
             None => {
-                // No token — allow through (used by Login RPC)
+                // No token — allow through (used by Login RPC and public endpoints).
                 // Each handler is responsible for checking its own auth requirements
-                // via get_claims() or require_admin()
+                // via get_claims() or require_admin().
                 return Ok(request);
             }
         };
@@ -52,9 +56,7 @@ fn extract_bearer_token(metadata: &tonic::metadata::MetadataMap) -> Option<Strin
 /// Returns an error if no claims are present.
 pub fn get_claims<T>(request: &Request<T>) -> Result<&Claims, Status> {
     request.extensions().get::<Claims>().ok_or_else(|| {
-        Status::unauthenticated(
-            "Authentication required. Use 'bosun login' first.",
-        )
+        Status::unauthenticated("Authentication required. Use 'bosun login' first.")
     })
 }
 

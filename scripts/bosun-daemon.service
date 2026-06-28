@@ -15,11 +15,13 @@ ExecStart=/usr/local/bin/bosun-daemon \
     --templates-dir /etc/bosun/catalog \
     --cert /etc/bosun/server.crt \
     --key /etc/bosun/server.key \
+    --jwt-secret $(cat /etc/bosun/jwt-secret) \
     --webhook-listen 0.0.0.0:9091 \
     --webhook-secret $(cat /etc/bosun/webhook-secret)
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=bosun_daemon=info
+Environment=BOSUN_ADMIN_PASSWORD=change-me
 
 # Sandboxing / hardening
 ProtectSystem=strict

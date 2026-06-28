@@ -43,11 +43,12 @@ BOSUN_RUST_LOG="${BOSUN_RUST_LOG:-bosun_daemon=info}"
 CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
 KEY_FILE="${BOSUN_CONFIG_DIR}/server.key"
 WEBHOOK_SECRET_FILE="${BOSUN_CONFIG_DIR}/webhook-secret"
+JWT_SECRET_FILE="${BOSUN_CONFIG_DIR}/jwt-secret"
 BUILD_DIR="$(mktemp -d /tmp/bosun-build.XXXXXX)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
 # ── Step 1: OS detection ──────────────────────────────────────────────────────
-header "Step 1/10: Detecting operating system"
+header "Step 1/13: Detecting operating system"
 
 if [ -f /etc/os-release ]; then
     # shellcheck source=/dev/null
@@ -69,7 +70,7 @@ case "$ID" in
 esac
 
 # ── Step 2: Install Docker Engine ─────────────────────────────────────────────
-header "Step 2/10: Installing Docker Engine"
+header "Step 2/13: Installing Docker Engine"
 
 if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
     info "Docker Engine is already installed and running."
@@ -117,7 +118,7 @@ fi
 # We'll handle group membership in the user-creation step below.
 
 # ── Step 3: Install Caddy reverse proxy ────────────────────────────────────────
-header "Step 3/11: Installing Caddy reverse proxy"
+header "Step 3/13: Installing Caddy reverse proxy"
 
 if command -v caddy &>/dev/null; then
     CADDY_VERSION="$(caddy version 2>/dev/null || echo 'unknown')"
@@ -164,7 +165,7 @@ else
 fi
 
 # ── Step 4: Install Rust toolchain ────────────────────────────────────────────
-header "Step 4/11: Installing Rust toolchain"
+header "Step 4/13: Installing Rust toolchain"
 
 if command -v cargo &>/dev/null && rustup --version &>/dev/null 2>&1; then
     info "Rust toolchain is already installed."
@@ -192,7 +193,7 @@ if ! command -v cargo &>/dev/null; then
 fi
 
 # ── Step 5: Clone / update bosun repo ─────────────────────────────────────────
-header "Step 5/11: Fetching bosun source"
+header "Step 5/13: Fetching bosun source"
 
 if [ -d "$BUILD_DIR/.git" ] && git -C "$BUILD_DIR" remote get-url origin &>/dev/null 2>&1; then
     info "Updating existing clone..."
@@ -210,7 +211,7 @@ else
 fi
 
 # ── Step 6: Build bosun-daemon ────────────────────────────────────────────────
-header "Step 6/11: Building bosun-daemon (release)"
+header "Step 6/13: Building bosun-daemon (release)"
 
 cd "$BUILD_DIR"
 
@@ -226,8 +227,8 @@ fi
 install -m 0755 "$BUILD_DIR/target/release/bosun-daemon" "$BOSUN_BIN_DIR/bosun-daemon"
 info "Installed bosun-daemon to $BOSUN_BIN_DIR/bosun-daemon"
 
-# ── Step 7: Create /etc/bosun/ directory and install catalog ──────────────────────
-header "Step 7/12: Setting up configuration directory and app catalog"
+# ── Step 7: Create /etc/bosun/ directory and install catalog ──────────────────
+header "Step 7/13: Setting up configuration directory and app catalog"
 
 mkdir -p "$BOSUN_CONFIG_DIR"
 chmod 0750 "$BOSUN_CONFIG_DIR"
@@ -246,7 +247,7 @@ else
 fi
 
 # ── Step 8: Generate self-signed TLS cert (if no certs provided) ──────────────
-header "Step 8/11: Setting up TLS certificates"
+header "Step 8/13: Setting up TLS certificates"
 
 if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
     info "TLS certificates already present:"
@@ -293,7 +294,7 @@ if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
 fi
 
 # ── Step 9: Generate webhook secret ────────────────────────────────────────────
-header "Step 9/12: Generating webhook secret"
+header "Step 9/13: Generating webhook secret"
 
 if [ -f "$WEBHOOK_SECRET_FILE" ]; then
     info "Webhook secret already exists at $WEBHOOK_SECRET_FILE"
@@ -305,8 +306,29 @@ else
     info "Webhook secret generated and saved to $WEBHOOK_SECRET_FILE"
 fi
 
-# ── Step 10: Create systemd service ────────────────────────────────────────────
-header "Step 10/12: Creating systemd service"
+# ── Step 10: Generate JWT secret and admin password ──────────────────────────
+header "Step 10/13: Generating JWT authentication secret"
+
+if [ -f "$JWT_SECRET_FILE" ]; then
+    info "JWT secret already exists at $JWT_SECRET_FILE"
+else
+    info "Generating random JWT secret..."
+    openssl rand -hex 32 > "$JWT_SECRET_FILE"
+    chmod 0600 "$JWT_SECRET_FILE"
+    chown "${BOSUN_USER}:${BOSUN_USER}" "$JWT_SECRET_FILE" 2>/dev/null || true
+    info "JWT secret generated and saved to $JWT_SECRET_FILE"
+fi
+
+# Generate default admin password if not set
+if [ -z "${BOSUN_ADMIN_PASSWORD:-}" ]; then
+    BOSUN_ADMIN_PASSWORD="$(openssl rand -hex 12)"
+    ADMIN_PASSWORD_GENERATED="true"
+else
+    ADMIN_PASSWORD_GENERATED="false"
+fi
+
+# ── Step 11: Create systemd service ────────────────────────────────────────────
+header "Step 11/13: Creating systemd service"
 
 # Create bosun system user if it doesn't exist
 if ! id -u "$BOSUN_USER" &>/dev/null; then
@@ -349,11 +371,13 @@ ExecStart=${BOSUN_BIN_DIR}/bosun-daemon \\
     --templates-dir ${BOSUN_CONFIG_DIR}/catalog \\
     --cert ${CERT_FILE} \\
     --key ${KEY_FILE} \\
+    --jwt-secret \$(cat ${JWT_SECRET_FILE}) \\
     --webhook-listen ${BOSUN_WEBHOOK_LISTEN} \\
     --webhook-secret \$(cat ${WEBHOOK_SECRET_FILE})
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=${BOSUN_RUST_LOG}
+Environment=BOSUN_ADMIN_PASSWORD=${BOSUN_ADMIN_PASSWORD}
 
 # Sandboxing / hardening
 ProtectSystem=strict
@@ -376,8 +400,8 @@ chmod 0644 "$SERVICE_FILE"
 # Reload systemd
 systemctl daemon-reload
 
-# ── Step 11: Enable and start the service ──────────────────────────────────────
-header "Step 11/12: Enabling and starting bosun-daemon"
+# ── Step 12: Enable and start the service ──────────────────────────────────────
+header "Step 12/13: Enabling and starting bosun-daemon"
 
 systemctl enable bosun-daemon.service
 
@@ -399,8 +423,8 @@ else
     warn "Check logs: journalctl -u bosun-daemon -f"
 fi
 
-# ── Step 12: Open firewall port ───────────────────────────────────────────────
-header "Step 12/12: Configuring firewall"
+# ── Step 13: Open firewall port ───────────────────────────────────────────────
+header "Step 13/13: Configuring firewall"
 
 BOSUN_PORT="${BOSUN_LISTEN_ADDR##*:}"
 WEBHOOK_PORT="${BOSUN_WEBHOOK_LISTEN##*:}"
@@ -442,12 +466,29 @@ echo -e "  ${CYAN}Config dir:${NC}     $BOSUN_CONFIG_DIR"
 echo -e "  ${CYAN}Data dir:${NC}       $BOSUN_DATA_DIR"
 echo -e "  ${CYAN}Service file:${NC}   $SERVICE_FILE"
 echo ""
+
+# Print admin credentials if generated
+if [ "$ADMIN_PASSWORD_GENERATED" = "true" ]; then
+    echo -e "  ${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${YELLOW}║  DEFAULT ADMIN CREDENTIALS — SAVE THIS!                      ║${NC}"
+    echo -e "  ${YELLOW}║                                                              ║${NC}"
+    echo -e "  ${YELLOW}║  Username: admin                                             ║${NC}"
+    echo -e "  ${YELLOW}║  Password: ${BOSUN_ADMIN_PASSWORD}                                           ║${NC}"
+    echo -e "  ${YELLOW}║                                                              ║${NC}"
+    echo -e "  ${YELLOW}║  This password will NOT be shown again.                      ║${NC}"
+    echo -e "  ${YELLOW}║  Change it immediately after your first login.               ║${NC}"
+    echo -e "  ${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+fi
+
+echo ""
 echo -e "  ${CYAN}Next steps:${NC}"
 echo -e "  1. Install the bosun CLI on your local machine:"
 echo -e "     cargo install --git $BOSUN_REPO bosun"
 echo ""
-echo -e "  2. Connect to your daemon:"
+echo -e "  2. Authenticate with the daemon:"
 echo -e "     export BOSUN_DAEMON=https://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'YOUR_SERVER_IP'):$BOSUN_PORT"
+echo -e "     bosun login admin"
+echo -e "     # Enter the admin password shown above"
 echo ""
 echo -e "  3. Deploy your first app:"
 echo -e "     bosun deploy ./my-app --domain my-app.example.com"
@@ -456,7 +497,10 @@ echo -e "     bosun deploy ./my-app --domain my-app.example.com --ssl"
 echo -e "     # With deploy strategy (direct, rolling, blue-green):"
 echo -e "     bosun deploy ./my-app --domain my-app.example.com --strategy rolling"
 echo ""
-echo -e "  4. Configure git push auto-deploy via webhook:"
+echo -e "  4. Create additional users:"
+echo -e "     bosun create-user myuser --password s3cret --role user"
+echo ""
+echo -e "  5. Configure git push auto-deploy via webhook:"
 echo -e "     curl -X POST https://YOUR_SERVER_IP:$WEBHOOK_PORT/hooks/my-app \\"
 echo -e "       -H 'X-Bosun-Secret: YOUR_WEBHOOK_SECRET' \\"
 echo -e "       -H 'X-Bosun-Strategy: rolling' \\"

@@ -601,4 +601,27 @@ impl Bosun for BosunService {
             .collect();
         Ok(Response::new(ListTemplatesResponse { templates }))
     }
+
+    // ── Backup & Restore (stubs) ────────────────────────────────────
+
+    async fn create_backup(
+        &self,
+        _request: Request<CreateBackupRequest>,
+    ) -> Result<Response<CreateBackupResponse>, Status> {
+        Err(Status::unimplemented("Backup not yet implemented"))
+    }
+
+    async fn list_backups(
+        &self,
+        _request: Request<ListBackupsRequest>,
+    ) -> Result<Response<ListBackupsResponse>, Status> {
+        Err(Status::unimplemented("Backup listing not yet implemented"))
+    }
+
+    async fn restore_backup(
+        &self,
+        _request: Request<RestoreBackupRequest>,
+    ) -> Result<Response<RestoreBackupResponse>, Status> {
+        Err(Status::unimplemented("Restore not yet implemented"))
+    }
 }
