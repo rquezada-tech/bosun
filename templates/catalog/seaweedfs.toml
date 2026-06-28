@@ -1,0 +1,16 @@
+name = "seaweedfs"
+description = "Distributed object storage and file system"
+category = "storage"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/seaweedfs.png"
+
+[[versions]]
+version = "latest"
+image = "chrislusf/seaweedfs:latest"
+default = true
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 9333
+filer = 8888

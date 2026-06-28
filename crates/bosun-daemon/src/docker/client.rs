@@ -15,7 +15,6 @@ use bollard::image::BuildImageOptions;
 use bollard::models::{HostConfig, PortBinding};
 use bollard::secret::ContainerSummary;
 use crate::server::v1::{App, AppStatus, LogEntry};
-use crate::templates::Template;
 use futures_util::StreamExt;
 
 pub struct DockerClient {
@@ -314,9 +313,12 @@ impl DockerClient {
     /// Pulls the Docker image, creates required directories, and starts
     /// the container with the template's pre-configured env vars, volumes,
     /// and port.
+    ///
+    /// `image` is the resolved Docker image (from the selected version).
     pub async fn deploy_template(
         &self,
-        template: &Template,
+        template: &crate::templates::Template,
+        image: &str,
         app_name: &str,
         domain: Option<&str>,
         port_override: Option<u16>,
@@ -327,14 +329,15 @@ impl DockerClient {
             "Deploying template '{}' as app '{}' (image={}, domain={:?}, port={})",
             template.name,
             app_name,
-            template.image,
+            image,
             domain,
             port
         );
 
-        // 1. Create host directories for volume mounts and resolve {name} placeholders
-        for (host_src, _container_dest) in &template.volumes {
-            let host_path = host_src.replace("{name}", app_name);
+        // 1. Create host directories for volume mounts
+        let data_root = format!("/var/lib/bosun/data/{}", app_name);
+        for vol in &template.volumes {
+            let host_path = format!("{}/{}", data_root, vol.name);
             std::fs::create_dir_all(&host_path)?;
             tracing::debug!("Created volume host directory: {}", host_path);
         }
@@ -366,13 +369,17 @@ impl DockerClient {
             }
         }
 
-        // 3. Build env vars with {name} placeholders resolved
+        // 3. Build env vars with default values and app name resolution
         let env: Vec<String> = template
             .env_vars
             .iter()
-            .map(|(k, v)| {
-                let resolved = v.replace("{name}", app_name);
-                format!("{}={}", k, resolved)
+            .map(|ev| {
+                let value = ev
+                    .default_value
+                    .as_deref()
+                    .unwrap_or("")
+                    .replace("{name}", app_name);
+                format!("{}={}", ev.name, value)
             })
             .collect();
 
@@ -380,9 +387,9 @@ impl DockerClient {
         let binds: Vec<String> = template
             .volumes
             .iter()
-            .map(|(host_src, container_dest)| {
-                let host_path = host_src.replace("{name}", app_name);
-                format!("{}:{}:rw", host_path, container_dest)
+            .map(|vol| {
+                let host_path = format!("{}/{}", data_root, vol.name);
+                format!("{}:{}:rw", host_path, vol.container_path)
             })
             .collect();
 
@@ -411,9 +418,9 @@ impl DockerClient {
         labels.insert("bosun.port".to_string(), port.to_string());
         labels.insert("bosun.health-check".to_string(), "true".to_string());
 
-        // 7. Create container config using the template image directly
+        // 7. Create container config using the resolved image
         let config = Config {
-            image: Some(template.image.to_string()),
+            image: Some(image.to_string()),
             exposed_ports: Some(exposed_ports),
             env: Some(env),
             labels: Some(labels),
@@ -438,7 +445,7 @@ impl DockerClient {
         tracing::info!(
             "Creating container '{}' from image '{}'...",
             app_name,
-            template.image
+            image
         );
         let container = self
             .inner

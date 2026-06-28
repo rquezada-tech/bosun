@@ -1,0 +1,12 @@
+name = "adminer"
+description = "Database management in a single PHP file"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/adminer.png"
+
+[[versions]]
+version = "latest"
+image = "adminer:latest"
+default = true
+
+[ports]
+main = 8080

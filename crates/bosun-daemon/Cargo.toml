@@ -32,6 +32,10 @@ tokio-stream.workspace = true
 tar.workspace = true
 reqwest.workspace = true
 axum.workspace = true
+toml.workspace = true
+jsonwebtoken.workspace = true
+bcrypt.workspace = true
+chrono.workspace = true
 
 # Uncomment when ready
 # instant-acme.workspace = true

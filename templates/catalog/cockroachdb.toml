@@ -1,0 +1,20 @@
+name = "cockroachdb"
+description = "Distributed SQL database for cloud-native applications"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/cockroachdb.png"
+
+[[versions]]
+version = "latest"
+image = "cockroachdb/cockroach:latest"
+default = true
+
+[env]
+COCKROACH_USER = { description = "Admin user", required = false, default_value = "root" }
+COCKROACH_PASSWORD = { description = "Admin password", required = false }
+
+[volumes]
+data = "/cockroach/cockroach-data"
+
+[ports]
+main = 26257
+http = 8080

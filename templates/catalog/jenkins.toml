@@ -1,0 +1,16 @@
+name = "jenkins"
+description = "Leading open source automation server for CI/CD"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/jenkins.png"
+
+[[versions]]
+version = "lts"
+image = "jenkins/jenkins:lts"
+default = true
+
+[volumes]
+data = "/var/jenkins_home"
+
+[ports]
+main = 8080
+agent = 50000

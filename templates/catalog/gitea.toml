@@ -1,0 +1,16 @@
+name = "gitea"
+description = "Painless self-hosted Git service, lightweight GitHub/GitLab alternative"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitea.png"
+
+[[versions]]
+version = "latest"
+image = "gitea/gitea:latest"
+default = true
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 3000
+ssh = 2222

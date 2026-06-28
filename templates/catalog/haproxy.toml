@@ -1,0 +1,17 @@
+name = "haproxy"
+description = "Reliable, high-performance TCP/HTTP load balancer"
+category = "proxy"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/haproxy.png"
+
+[[versions]]
+version = "alpine"
+image = "haproxy:alpine"
+default = true
+
+[volumes]
+config = "/usr/local/etc/haproxy"
+
+[ports]
+main = 80
+https = 443
+stats = 8404

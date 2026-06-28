@@ -1,6 +1,6 @@
 //! Persistent state storage via SQLite.
 //!
-//! Stores: metric history, environment variables, daemon configuration.
+//! Stores: users, metric history, environment variables, daemon configuration.
 #![allow(dead_code)] // MVP: some methods used in Phase 2
 
 use std::collections::HashMap;
@@ -23,7 +23,12 @@ impl Store {
         let conn = rusqlite::Connection::open(path)?;
         // Create tables
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS metrics (
+            "CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
+            );
+            CREATE TABLE IF NOT EXISTS metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 app_name TEXT NOT NULL,
                 cpu_percent REAL NOT NULL DEFAULT 0,
@@ -48,6 +53,74 @@ impl Store {
             conn: Mutex::new(conn),
         })
     }
+
+    // ── User management ───────────────────────────────────────────
+
+    /// Create a new user.
+    pub fn create_user(
+        &self,
+        username: &str,
+        password_hash: &str,
+        role: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role) VALUES (?1, ?2, ?3)",
+            rusqlite::params![username, password_hash, role],
+        )?;
+        Ok(())
+    }
+
+    /// Get a user by username.
+    pub fn get_user(&self, username: &str) -> anyhow::Result<Option<UserRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT username, password_hash, role FROM users WHERE username = ?1",
+        )?;
+        let result = stmt
+            .query_row(rusqlite::params![username], |row| {
+                Ok(UserRecord {
+                    username: row.get(0)?,
+                    password_hash: row.get(1)?,
+                    role: row.get(2)?,
+                })
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    /// List all users.
+    pub fn list_users(&self) -> anyhow::Result<Vec<UserRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT username, password_hash, role FROM users ORDER BY username",
+        )?;
+        let records = stmt
+            .query_map([], |row| {
+                Ok(UserRecord {
+                    username: row.get(0)?,
+                    password_hash: row.get(1)?,
+                    role: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(records)
+    }
+
+    /// Delete a user by username.
+    pub fn delete_user(&self, username: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM users WHERE username = ?1",
+            rusqlite::params![username],
+        )?;
+        if affected == 0 {
+            anyhow::bail!("User '{}' not found", username);
+        }
+        Ok(())
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────
 
     /// Insert a metric snapshot into the database.
     pub fn insert_metric(&self, metric: &AppMetric) -> anyhow::Result<()> {
@@ -111,7 +184,13 @@ impl Store {
     }
 
     /// Insert or update an app record.
-    pub fn upsert_app(&self, name: &str, domain: Option<&str>, port: Option<u32>, env: &HashMap<String, String>) -> anyhow::Result<()> {
+    pub fn upsert_app(
+        &self,
+        name: &str,
+        domain: Option<&str>,
+        port: Option<u32>,
+        env: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
         let conn = self.conn.lock().unwrap();
         let env_json = serde_json::to_string(env)?;
         conn.execute(
@@ -198,6 +277,14 @@ impl Store {
         )?;
         Ok(())
     }
+}
+
+/// A row from the `users` table.
+#[derive(Debug, Clone)]
+pub struct UserRecord {
+    pub username: String,
+    pub password_hash: String,
+    pub role: String,
 }
 
 /// A row from the `apps` table.

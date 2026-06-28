@@ -1,0 +1,21 @@
+name = "wordpress"
+description = "World's most popular content management system"
+category = "cms"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wordpress.png"
+
+[[versions]]
+version = "latest"
+image = "wordpress:php8.3-apache"
+default = true
+
+[env]
+WORDPRESS_DB_HOST = { required = true }
+WORDPRESS_DB_USER = { required = true }
+WORDPRESS_DB_PASSWORD = { required = true }
+WORDPRESS_DB_NAME = { required = false, default_value = "wordpress" }
+
+[volumes]
+data = "/var/www/html"
+
+[ports]
+main = 80

@@ -1,0 +1,12 @@
+name = "node-exporter"
+description = "Prometheus exporter for hardware and OS metrics"
+category = "monitoring"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nodeexporter.png"
+
+[[versions]]
+version = "latest"
+image = "prom/node-exporter:latest"
+default = true
+
+[ports]
+main = 9100

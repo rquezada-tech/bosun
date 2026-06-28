@@ -1,0 +1,18 @@
+name = "registry"
+description = "Docker Registry implementation for storing and distributing container images"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/registry.png"
+
+[[versions]]
+version = "2"
+image = "registry:2"
+default = true
+
+[env]
+REGISTRY_HTTP_SECRET = { required = false }
+
+[volumes]
+data = "/var/lib/registry"
+
+[ports]
+main = 5000

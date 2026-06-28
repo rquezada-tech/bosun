@@ -1,0 +1,25 @@
+name = "mysql"
+description = "The world's most popular open source relational database"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mysql.png"
+
+[[versions]]
+version = "8.4"
+image = "mysql:8.4"
+default = true
+
+[[versions]]
+version = "8.0"
+image = "mysql:8.0"
+
+[env]
+MYSQL_ROOT_PASSWORD = { description = "Root password", required = true, default_value = "bosun" }
+MYSQL_DATABASE = { description = "Default database name", required = false, default_value = "{name}" }
+MYSQL_USER = { description = "Additional user", required = false }
+MYSQL_PASSWORD = { description = "Additional user password", required = false }
+
+[volumes]
+data = "/var/lib/mysql"
+
+[ports]
+main = 3306

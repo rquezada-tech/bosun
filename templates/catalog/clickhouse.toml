@@ -1,0 +1,21 @@
+name = "clickhouse"
+description = "Column-oriented database for online analytical processing (OLAP)"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/clickhouse.png"
+
+[[versions]]
+version = "latest"
+image = "clickhouse/clickhouse-server:latest"
+default = true
+
+[env]
+CLICKHOUSE_USER = { description = "Admin user", required = false, default_value = "default" }
+CLICKHOUSE_PASSWORD = { description = "Admin password", required = false, default_value = "bosun" }
+CLICKHOUSE_DB = { description = "Default database", required = false, default_value = "{name}" }
+
+[volumes]
+data = "/var/lib/clickhouse"
+
+[ports]
+main = 8123
+native = 9000

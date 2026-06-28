@@ -1,0 +1,13 @@
+name = "nats"
+description = "Cloud-native, high-performance messaging system"
+category = "queue"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nats.png"
+
+[[versions]]
+version = "alpine"
+image = "nats:alpine"
+default = true
+
+[ports]
+main = 4222
+monitoring = 8222

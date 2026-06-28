@@ -1,0 +1,20 @@
+name = "drone-ci"
+description = "Self-service continuous integration platform"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/drone.png"
+
+[[versions]]
+version = "latest"
+image = "drone/drone:latest"
+default = true
+
+[env]
+DRONE_SERVER_HOST = { required = true }
+DRONE_SERVER_PROTO = { required = false, default_value = "https" }
+DRONE_RPC_SECRET = { required = true }
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 80

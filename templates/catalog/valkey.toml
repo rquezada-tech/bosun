@@ -1,0 +1,22 @@
+name = "valkey"
+description = "High-performance key-value store, drop-in replacement for Redis OSS"
+category = "cache"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/valkey.png"
+
+[[versions]]
+version = "8-alpine"
+image = "valkey/valkey:8-alpine"
+default = true
+
+[[versions]]
+version = "7-alpine"
+image = "valkey/valkey:7-alpine"
+
+[env]
+VALKEY_PASSWORD = { description = "Password for Valkey", required = false }
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 6379

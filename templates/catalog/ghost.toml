@@ -1,0 +1,18 @@
+name = "ghost"
+description = "Professional publishing platform for blogs and newsletters"
+category = "cms"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ghost.png"
+
+[[versions]]
+version = "latest"
+image = "ghost:latest"
+default = true
+
+[env]
+url = { required = false, default_value = "http://localhost:2368" }
+
+[volumes]
+content = "/var/lib/ghost/content"
+
+[ports]
+main = 2368

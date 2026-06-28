@@ -1,0 +1,21 @@
+name = "nginx"
+description = "High-performance web server and reverse proxy"
+category = "proxy"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nginx.png"
+
+[[versions]]
+version = "alpine"
+image = "nginx:alpine"
+default = true
+
+[[versions]]
+version = "stable"
+image = "nginx:stable"
+
+[volumes]
+html = "/usr/share/nginx/html"
+conf = "/etc/nginx/conf.d"
+
+[ports]
+main = 80
+https = 443

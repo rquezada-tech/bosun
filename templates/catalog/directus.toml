@@ -1,0 +1,21 @@
+name = "directus"
+description = "Open-source data platform wrapping any SQL database with an API and admin app"
+category = "cms"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/directus.png"
+
+[[versions]]
+version = "latest"
+image = "directus/directus:latest"
+default = true
+
+[env]
+ADMIN_EMAIL = { required = false, default_value = "admin@example.com" }
+ADMIN_PASSWORD = { required = false, default_value = "bosun1234" }
+KEY = { required = true }
+
+[volumes]
+uploads = "/directus/uploads"
+database = "/directus/database"
+
+[ports]
+main = 8055

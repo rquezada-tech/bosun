@@ -7,40 +7,155 @@ pub mod v1 {
 }
 
 use std::pin::Pin;
+use std::sync::Arc;
 use v1::bosun_server::Bosun;
 use v1::*;
 use tonic::{Request, Response, Status};
 use tokio_stream::Stream;
 
+use crate::auth::interceptor;
+
 pub struct BosunService {
-    pub docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
-    pub metrics: std::sync::Arc<crate::metrics::MetricCollector>,
-    pub store: std::sync::Arc<crate::persist::Store>,
-    pub proxy: Option<std::sync::Arc<crate::proxy::CaddyClient>>,
+    pub docker: Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
+    pub metrics: Arc<crate::metrics::MetricCollector>,
+    pub store: Arc<crate::persist::Store>,
+    pub proxy: Option<Arc<crate::proxy::CaddyClient>>,
     /// Shared restart-count map populated by the health checker.
     pub restart_counts: crate::health::RestartCounts,
+    /// Auth service for user management and token validation.
+    pub auth_service: Arc<crate::auth::AuthService>,
+    /// Template catalog for one-click apps.
+    pub catalog: Arc<crate::templates::Catalog>,
 }
 
 impl BosunService {
     pub fn new(
-        docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
+        docker: Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
         metrics: crate::metrics::MetricCollector,
-        store: crate::persist::Store,
+        store: Arc<crate::persist::Store>,
         proxy: Option<crate::proxy::CaddyClient>,
         restart_counts: crate::health::RestartCounts,
+        auth_service: Arc<crate::auth::AuthService>,
+        catalog: Arc<crate::templates::Catalog>,
     ) -> Self {
         Self {
             docker,
-            metrics: std::sync::Arc::new(metrics),
-            store: std::sync::Arc::new(store),
-            proxy: proxy.map(std::sync::Arc::new),
+            metrics: Arc::new(metrics),
+            store,
+            proxy: proxy.map(Arc::new),
             restart_counts,
+            auth_service,
+            catalog,
         }
     }
 }
 
 #[tonic::async_trait]
 impl Bosun for BosunService {
+    // ── Auth RPCs ──────────────────────────────────────────────────
+
+    async fn login(
+        &self,
+        request: Request<LoginRequest>,
+    ) -> Result<Response<LoginResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("login called for user '{}'", req.username);
+
+        let token = self
+            .auth_service
+            .login(&req.username, &req.password)
+            .map_err(|e| {
+                tracing::warn!("Login failed for '{}': {}", req.username, e);
+                Status::unauthenticated(format!("Login failed: {}", e))
+            })?;
+
+        // Get user role from the store
+        let user = self
+            .store
+            .get_user(&req.username)
+            .map_err(|e| Status::internal(format!("Failed to look up user: {}", e)))?
+            .ok_or_else(|| Status::internal("User not found after successful login"))?;
+
+        tracing::info!("User '{}' logged in successfully", req.username);
+
+        Ok(Response::new(LoginResponse {
+            token,
+            username: req.username,
+            role: user.role,
+        }))
+    }
+
+    async fn list_users(
+        &self,
+        request: Request<ListUsersRequest>,
+    ) -> Result<Response<ListUsersResponse>, Status> {
+        // Require admin
+        interceptor::require_admin(&request)?;
+
+        tracing::info!("list_users called");
+        let users = self
+            .auth_service
+            .list_users()
+            .map_err(|e| Status::internal(format!("Failed to list users: {}", e)))?;
+
+        let user_infos: Vec<UserInfo> = users
+            .iter()
+            .map(|u| UserInfo {
+                username: u.username.clone(),
+                role: u.role.clone(),
+            })
+            .collect();
+
+        Ok(Response::new(ListUsersResponse { users: user_infos }))
+    }
+
+    async fn create_user(
+        &self,
+        request: Request<CreateUserRequest>,
+    ) -> Result<Response<CreateUserResponse>, Status> {
+        // Require admin
+        interceptor::require_admin(&request)?;
+
+        let req = request.into_inner();
+        tracing::info!(
+            "create_user called: username='{}', role='{}'",
+            req.username,
+            req.role
+        );
+
+        self.auth_service
+            .create_user(&req.username, &req.password, &req.role)
+            .map_err(|e| Status::invalid_argument(format!("Failed to create user: {}", e)))?;
+
+        Ok(Response::new(CreateUserResponse {}))
+    }
+
+    async fn delete_user(
+        &self,
+        request: Request<DeleteUserRequest>,
+    ) -> Result<Response<DeleteUserResponse>, Status> {
+        // Require admin — extract claims before consuming request
+        let claims = interceptor::require_admin(&request)?.clone();
+        let req = request.into_inner();
+
+        // Prevent deleting your own account
+        if claims.sub == req.username {
+            return Err(Status::invalid_argument(
+                "Cannot delete your own account",
+            ));
+        }
+
+        tracing::info!("delete_user called for '{}'", req.username);
+
+        self.auth_service
+            .delete_user(&req.username)
+            .map_err(|e| Status::not_found(format!("Failed to delete user: {}", e)))?;
+
+        Ok(Response::new(DeleteUserResponse {}))
+    }
+
+    // ── App management ─────────────────────────────────────────────
+
     async fn list_apps(
         &self,
         _request: Request<ListAppsRequest>,
@@ -138,7 +253,13 @@ impl Bosun for BosunService {
         &self,
         request: Request<DeployRequest>,
     ) -> Result<Response<DeployResponse>, Status> {
+        // Extract claims for created-by label BEFORE consuming the request
+        let created_by = interceptor::get_claims(&request)
+            .map(|c| c.sub.clone())
+            .unwrap_or_else(|_| "unknown".to_string());
+
         let req = request.into_inner();
+
         // Derive app name from context path directory name
         let app_name = std::path::Path::new(&req.context_path)
             .file_name()
@@ -158,8 +279,9 @@ impl Bosun for BosunService {
         };
 
         tracing::info!(
-            "Deploy request: strategy={:?}",
-            strategy
+            "Deploy request: strategy={:?}, created_by='{}'",
+            strategy,
+            created_by
         );
 
         // Validate SSL flag: requires a domain for Let's Encrypt via Caddy
@@ -175,15 +297,21 @@ impl Bosun for BosunService {
             );
         }
 
-        let env_vars: std::collections::HashMap<String, String> = req.env;
+        // Extract template version request BEFORE moving req.env
+        let version_requested = req.env.get("BOSUN_TEMPLATE_VERSION").cloned();
+
+        // Add created-by to env vars as a Docker label
+        let mut env_vars: std::collections::HashMap<String, String> = req.env;
+        env_vars.insert("BOSUN_CREATED_BY".to_string(), created_by.clone());
 
         // Check if context_path is a known built-in template name
         // If so, use template deploy (no Dockerfile needed).
-        if let Some(template) = crate::templates::get_template(&app_name) {
+        if let Some((template, resolved_image)) = self.catalog.get_template(&app_name, version_requested.as_deref()) {
             tracing::info!(
-                "Deploy request: template={}, app={}, domain={:?}, port={}, ssl={}",
+                "Deploy request: template={}, app={}, image={}, domain={:?}, port={}, ssl={}",
                 template.name,
                 app_name,
+                resolved_image,
                 domain,
                 port,
                 enable_ssl
@@ -197,9 +325,12 @@ impl Bosun for BosunService {
             };
 
             docker
-                .deploy_template(template, &app_name, domain, port_override)
+                .deploy_template(template, &resolved_image, &app_name, domain, port_override)
                 .await
-                .map_err(|e| Status::internal(format!("Template deploy failed: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Template deploy failed: {:#}", e)))?;
+
+            // Add bosun.created-by label — tracked via docker labels at deploy time
+            tracing::debug!("App '{}' created by '{}'", app_name, created_by);
 
             // Health check
             tracing::info!(
@@ -267,6 +398,9 @@ impl Bosun for BosunService {
         )
         .await
         .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
+
+        // Track created-by via docker labels
+        tracing::debug!("App '{}' created by '{}' (non-template deploy)", app_name, created_by);
 
         // Persist app metadata and env vars
         let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
@@ -454,13 +588,15 @@ impl Bosun for BosunService {
         _request: Request<ListTemplatesRequest>,
     ) -> Result<Response<ListTemplatesResponse>, Status> {
         tracing::info!("list_templates called");
-        let templates = crate::templates::list_templates()
+        let templates = self.catalog.list_templates()
             .iter()
             .map(|t| TemplateInfo {
-                name: t.name.to_string(),
-                description: t.description.to_string(),
+                name: t.name.clone(),
+                description: t.description.clone(),
                 category: t.category.as_str().to_string(),
                 default_port: t.default_port as u32,
+                versions: t.versions.iter().map(|v| v.version.clone()).collect(),
+                icon: t.icon.clone().unwrap_or_default(),
             })
             .collect();
         Ok(Response::new(ListTemplatesResponse { templates }))

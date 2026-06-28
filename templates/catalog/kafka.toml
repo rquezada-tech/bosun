@@ -1,0 +1,16 @@
+name = "kafka"
+description = "Distributed event streaming platform (Bitnami image with Zookeeper included)"
+category = "queue"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/kafka.png"
+
+[[versions]]
+version = "latest"
+image = "bitnami/kafka:latest"
+default = true
+
+[env]
+KAFKA_CFG_LISTENERS = { required = false, default_value = "PLAINTEXT://:9092" }
+KAFKA_CFG_ADVERTISED_LISTENERS = { required = false, default_value = "PLAINTEXT://localhost:9092" }
+
+[ports]
+main = 9092

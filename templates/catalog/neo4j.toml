@@ -1,0 +1,19 @@
+name = "neo4j"
+description = "Graph database for connected data and knowledge graphs"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/neo4j.png"
+
+[[versions]]
+version = "5"
+image = "neo4j:5"
+default = true
+
+[env]
+NEO4J_AUTH = { description = "Auth in format neo4j/password", required = false, default_value = "neo4j/bosun1234" }
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 7474
+bolt = 7687

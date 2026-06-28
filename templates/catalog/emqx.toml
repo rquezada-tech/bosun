@@ -1,0 +1,13 @@
+name = "emqx"
+description = "Scalable MQTT broker for IoT and real-time messaging"
+category = "queue"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/emqx.png"
+
+[[versions]]
+version = "latest"
+image = "emqx/emqx:latest"
+default = true
+
+[ports]
+main = 1883
+dashboard = 18083

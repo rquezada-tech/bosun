@@ -1,0 +1,14 @@
+name = "traefik"
+description = "Cloud-native reverse proxy and load balancer with automatic service discovery"
+category = "proxy"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/traefik.png"
+
+[[versions]]
+version = "latest"
+image = "traefik:latest"
+default = true
+
+[ports]
+main = 80
+https = 443
+dashboard = 8080

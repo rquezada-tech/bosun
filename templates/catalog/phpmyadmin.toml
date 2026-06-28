@@ -1,0 +1,16 @@
+name = "phpmyadmin"
+description = "Web-based MySQL/MariaDB administration tool"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/phpmyadmin.png"
+
+[[versions]]
+version = "latest"
+image = "phpmyadmin:latest"
+default = true
+
+[env]
+PMA_HOST = { required = false }
+PMA_PORT = { required = false }
+
+[ports]
+main = 80

@@ -1,0 +1,19 @@
+name = "couchdb"
+description = "Seamless multi-master sync database with an HTTP API"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/couchdb.png"
+
+[[versions]]
+version = "3"
+image = "couchdb:3"
+default = true
+
+[env]
+COUCHDB_USER = { description = "Admin user", required = false, default_value = "admin" }
+COUCHDB_PASSWORD = { description = "Admin password", required = false, default_value = "bosun" }
+
+[volumes]
+data = "/opt/couchdb/data"
+
+[ports]
+main = 5984

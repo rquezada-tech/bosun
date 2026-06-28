@@ -1,0 +1,16 @@
+name = "portainer"
+description = "Universal container management GUI for Docker, Swarm, and Kubernetes"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/portainer.png"
+
+[[versions]]
+version = "latest"
+image = "portainer/portainer-ce:latest"
+default = true
+
+[volumes]
+data = "/data"
+docker_socket = "/var/run/docker.sock"
+
+[ports]
+main = 9000

@@ -1,0 +1,19 @@
+name = "strapi"
+description = "Headless CMS for building customizable APIs"
+category = "cms"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/strapi.png"
+
+[[versions]]
+version = "latest"
+image = "strapi/strapi:latest"
+default = true
+
+[env]
+DATABASE_CLIENT = { required = false, default_value = "sqlite" }
+DATABASE_FILENAME = { required = false, default_value = "/data/strapi.db" }
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 1337

@@ -1,0 +1,22 @@
+name = "influxdb"
+description = "Time series database for metrics, events, and real-time analytics"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/influxdb.png"
+
+[[versions]]
+version = "2"
+image = "influxdb:2"
+default = true
+
+[env]
+DOCKER_INFLUXDB_INIT_MODE = { description = "Initialization mode", required = false, default_value = "setup" }
+DOCKER_INFLUXDB_INIT_USERNAME = { description = "Admin username", required = false, default_value = "admin" }
+DOCKER_INFLUXDB_INIT_PASSWORD = { description = "Admin password", required = false, default_value = "bosun1234" }
+DOCKER_INFLUXDB_INIT_ORG = { description = "Organization name", required = false, default_value = "bosun" }
+DOCKER_INFLUXDB_INIT_BUCKET = { description = "Default bucket", required = false, default_value = "default" }
+
+[volumes]
+data = "/var/lib/influxdb2"
+
+[ports]
+main = 8086

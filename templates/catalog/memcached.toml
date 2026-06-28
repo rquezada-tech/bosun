@@ -1,0 +1,12 @@
+name = "memcached"
+description = "High-performance distributed memory object caching system"
+category = "cache"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/memcached.png"
+
+[[versions]]
+version = "alpine"
+image = "memcached:alpine"
+default = true
+
+[ports]
+main = 11211

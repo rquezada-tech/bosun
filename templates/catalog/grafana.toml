@@ -1,0 +1,19 @@
+name = "grafana"
+description = "Observability and data visualization platform"
+category = "monitoring"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png"
+
+[[versions]]
+version = "latest"
+image = "grafana/grafana:latest"
+default = true
+
+[env]
+GF_SECURITY_ADMIN_USER = { required = false, default_value = "admin" }
+GF_SECURITY_ADMIN_PASSWORD = { required = false, default_value = "bosun" }
+
+[volumes]
+data = "/var/lib/grafana"
+
+[ports]
+main = 3000

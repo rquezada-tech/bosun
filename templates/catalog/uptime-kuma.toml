@@ -1,0 +1,15 @@
+name = "uptime-kuma"
+description = "Fancy self-hosted monitoring tool for uptime and status pages"
+category = "monitoring"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/uptime-kuma.png"
+
+[[versions]]
+version = "latest"
+image = "louislam/uptime-kuma:latest"
+default = true
+
+[volumes]
+data = "/app/data"
+
+[ports]
+main = 3001

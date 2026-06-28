@@ -12,6 +12,7 @@ Group=bosun
 ExecStart=/usr/local/bin/bosun-daemon \
     --listen 0.0.0.0:9090 \
     --data-dir /var/lib/bosun \
+    --templates-dir /etc/bosun/catalog \
     --cert /etc/bosun/server.crt \
     --key /etc/bosun/server.key \
     --webhook-listen 0.0.0.0:9091 \

@@ -1,0 +1,22 @@
+name = "redis"
+description = "In-memory data structure store, used as database, cache, and message broker"
+category = "cache"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/redis.png"
+
+[[versions]]
+version = "7-alpine"
+image = "redis:7-alpine"
+default = true
+
+[[versions]]
+version = "6-alpine"
+image = "redis:6-alpine"
+
+[env]
+REDIS_PASSWORD = { description = "Password for Redis", required = false }
+
+[volumes]
+data = "/data"
+
+[ports]
+main = 6379

@@ -15,6 +15,7 @@ use tokio::signal;
 use tonic::transport::server::ServerTlsConfig;
 use tonic::transport::{Identity, Server};
 
+mod auth;
 mod server;
 mod docker;
 mod deploy;
@@ -52,6 +53,15 @@ struct Args {
     /// Webhook shared secret for authentication
     #[arg(long, env = "BOSUN_WEBHOOK_SECRET")]
     webhook_secret: Option<String>,
+
+    /// JWT secret for token signing (64+ hex chars recommended).
+    /// If not set, reads from /etc/bosun/jwt-secret or generates a random one.
+    #[arg(long, env = "BOSUN_JWT_SECRET")]
+    jwt_secret: Option<String>,
+
+    /// Directory containing TOML template catalog files
+    #[arg(long, default_value = "templates/catalog")]
+    templates_dir: String,
 }
 
 #[tokio::main]
@@ -78,7 +88,49 @@ async fn main() -> anyhow::Result<()> {
     // Initialize persistence store
     let db_path = PathBuf::from(&args.data_dir).join("bosun.db");
     let store = persist::Store::open(&db_path)?;
+    let store = Arc::new(store);
     tracing::info!("Persistence store opened at {}", db_path.display());
+
+    // Resolve JWT secret
+    let jwt_secret = resolve_jwt_secret(args.jwt_secret.as_deref())?;
+
+    // Initialize auth service
+    let auth_service = Arc::new(auth::AuthService::new(jwt_secret, store.clone()));
+    let admin_password = auth_service.ensure_admin_user()?;
+    if let Some(pw) = admin_password {
+        tracing::warn!(
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+             Default admin user created!\n\
+             Username: admin\n\
+             Password: {pw}\n\
+             \n\
+             IMPORTANT: Save this password now. You can change it with:\n\
+               bosun-daemon ... (admin-only API for password change TBD)\n\
+             ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        );
+        eprintln!(
+            "Default admin password: {pw}\n\
+             (Save this! It will not be shown again.)"
+        );
+    }
+
+    // Load template catalog from filesystem
+    let catalog_path = std::path::Path::new(&args.templates_dir);
+    let catalog = templates::Catalog::load(catalog_path)
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to load template catalog from {}: {}. Using empty catalog.",
+                catalog_path.display(),
+                e
+            );
+            templates::Catalog::empty()
+        });
+    tracing::info!(
+        "Loaded {} app templates from {}",
+        catalog.list_templates().len(),
+        catalog_path.display()
+    );
+    let catalog = Arc::new(catalog);
 
     // Connect to Docker
     let docker = docker::DockerClient::connect().await?;
@@ -102,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
     // Create metric collector (shares the Docker connection)
     let metrics = metrics::MetricCollector::new(docker_inner);
 
-    // Create the gRPC service
+    // Create the gRPC service (with auth)
     let proxy = match proxy::CaddyClient::new().await {
         Ok(client) => {
             tracing::info!("Caddy reverse proxy integration enabled");
@@ -119,10 +171,17 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let bosun_service =
-        server::BosunService::new(docker_arc, metrics, store, proxy, restart_counts);
+    let bosun_service = server::BosunService::new(
+        docker_arc,
+        metrics,
+        store,
+        proxy,
+        restart_counts,
+        auth_service.clone(),
+        catalog,
+    );
 
-    // Build the gRPC server
+    // Build the gRPC server with auth interceptor
     let addr = args.listen.parse()?;
     let mut builder = Server::builder();
 
@@ -137,7 +196,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("TLS disabled — running without encryption");
     }
 
+    // Create auth interceptor using tonic's InterceptorLayer
+    let auth_interceptor = tonic::service::InterceptorLayer::new(
+        auth::interceptor::create_interceptor(auth_service),
+    );
+
     let router = builder
+        .layer(auth_interceptor)
         .add_service(server::v1::bosun_server::BosunServer::new(bosun_service));
 
     tracing::info!("gRPC server listening on {}", args.listen);
@@ -175,4 +240,35 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Server shut down gracefully");
     Ok(())
+}
+
+/// Resolve the JWT secret from CLI arg, file, or generate a random one.
+fn resolve_jwt_secret(cli_secret: Option<&str>) -> anyhow::Result<String> {
+    // 1. CLI argument (or env var BOSUN_JWT_SECRET)
+    if let Some(s) = cli_secret {
+        if !s.is_empty() {
+            tracing::info!("Using JWT secret from CLI/env");
+            return Ok(s.to_string());
+        }
+    }
+
+    // 2. File at /etc/bosun/jwt-secret
+    let file_path = "/etc/bosun/jwt-secret";
+    if let Ok(content) = std::fs::read_to_string(file_path) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            tracing::info!("Using JWT secret from {}", file_path);
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    // 3. Generate a random 64-char hex secret
+    tracing::warn!("No JWT secret provided. Generating a random one (not persistent!).");
+    tracing::warn!("Set --jwt-secret or /etc/bosun/jwt-secret for production.");
+    let mut buf = [0u8; 32];
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom")?;
+    f.read_exact(&mut buf)?;
+    let hex_str: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    Ok(hex_str)
 }

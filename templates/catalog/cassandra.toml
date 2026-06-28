@@ -1,0 +1,22 @@
+name = "cassandra"
+description = "Highly scalable distributed NoSQL database"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/cassandra.png"
+
+[[versions]]
+version = "5"
+image = "cassandra:5"
+default = true
+
+[[versions]]
+version = "4"
+image = "cassandra:4"
+
+[env]
+CASSANDRA_CLUSTER_NAME = { description = "Cluster name", required = false, default_value = "Bosun Cluster" }
+
+[volumes]
+data = "/var/lib/cassandra"
+
+[ports]
+main = 9042

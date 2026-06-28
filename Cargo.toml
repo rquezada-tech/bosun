@@ -57,8 +57,16 @@ reqwest = { version = "0.12", features = ["json"] }
 # Templating (config files, nginx config generation)
 tera = "1"
 
+# TOML parsing (one-click app catalog)
+toml = "0.8"
+
 # HTTP webhook server
 axum = "0.8"
+
+# JWT authentication
+jsonwebtoken = "9"
+bcrypt = "0.16"
+chrono = { version = "0.4", features = ["serde"] }
 
 # Stream utilities (for Docker build output + metrics streaming)
 futures-util = "0.3"

@@ -226,11 +226,24 @@ fi
 install -m 0755 "$BUILD_DIR/target/release/bosun-daemon" "$BOSUN_BIN_DIR/bosun-daemon"
 info "Installed bosun-daemon to $BOSUN_BIN_DIR/bosun-daemon"
 
-# ── Step 7: Create /etc/bosun/ directory ──────────────────────────────────────
-header "Step 7/11: Setting up configuration directory"
+# ── Step 7: Create /etc/bosun/ directory and install catalog ──────────────────────
+header "Step 7/12: Setting up configuration directory and app catalog"
 
 mkdir -p "$BOSUN_CONFIG_DIR"
 chmod 0750 "$BOSUN_CONFIG_DIR"
+
+# Copy template catalog to /etc/bosun/catalog/
+CATALOG_SRC="${BUILD_DIR}/templates/catalog"
+CATALOG_DST="${BOSUN_CONFIG_DIR}/catalog"
+if [ -d "$CATALOG_SRC" ]; then
+    info "Installing app template catalog to $CATALOG_DST"
+    rm -rf "$CATALOG_DST"
+    cp -r "$CATALOG_SRC" "$CATALOG_DST"
+    chown -R "${BOSUN_USER}:${BOSUN_USER}" "$CATALOG_DST" 2>/dev/null || true
+    info "App catalog installed ($(find "$CATALOG_DST" -name '*.toml' | wc -l) templates)"
+else
+    warn "Template catalog not found at $CATALOG_SRC. Templates will be unavailable."
+fi
 
 # ── Step 8: Generate self-signed TLS cert (if no certs provided) ──────────────
 header "Step 8/11: Setting up TLS certificates"
@@ -333,6 +346,7 @@ Group=${BOSUN_USER}
 ExecStart=${BOSUN_BIN_DIR}/bosun-daemon \\
     --listen ${BOSUN_LISTEN_ADDR} \\
     --data-dir ${BOSUN_DATA_DIR} \\
+    --templates-dir ${BOSUN_CONFIG_DIR}/catalog \\
     --cert ${CERT_FILE} \\
     --key ${KEY_FILE} \\
     --webhook-listen ${BOSUN_WEBHOOK_LISTEN} \\

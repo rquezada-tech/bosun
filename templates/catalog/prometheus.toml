@@ -1,0 +1,16 @@
+name = "prometheus"
+description = "Open-source systems monitoring and alerting toolkit"
+category = "monitoring"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prometheus.png"
+
+[[versions]]
+version = "latest"
+image = "prom/prometheus:latest"
+default = true
+
+[volumes]
+config = "/etc/prometheus"
+data = "/prometheus"
+
+[ports]
+main = 9090

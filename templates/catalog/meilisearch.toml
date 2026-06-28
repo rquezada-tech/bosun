@@ -1,0 +1,18 @@
+name = "meilisearch"
+description = "Fast, relevant, typo-tolerant full-text search engine"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/meilisearch.png"
+
+[[versions]]
+version = "latest"
+image = "getmeili/meilisearch:latest"
+default = true
+
+[env]
+MEILI_MASTER_KEY = { description = "Master key for authentication", required = false, default_value = "bosun-master-key" }
+
+[volumes]
+data = "/meili_data"
+
+[ports]
+main = 7700

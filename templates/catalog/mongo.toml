@@ -1,0 +1,24 @@
+name = "mongo"
+description = "Document-oriented NoSQL database for modern applications"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png"
+
+[[versions]]
+version = "7"
+image = "mongo:7"
+default = true
+
+[[versions]]
+version = "6"
+image = "mongo:6"
+
+[env]
+MONGO_INITDB_ROOT_USERNAME = { description = "Root username", required = false }
+MONGO_INITDB_ROOT_PASSWORD = { description = "Root password", required = false }
+MONGO_INITDB_DATABASE = { description = "Default database", required = false, default_value = "{name}" }
+
+[volumes]
+data = "/data/db"
+
+[ports]
+main = 27017

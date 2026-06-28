@@ -1,0 +1,17 @@
+name = "caddy"
+description = "Extensible, cross-platform, open-source web server with automatic HTTPS"
+category = "proxy"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/caddy.png"
+
+[[versions]]
+version = "alpine"
+image = "caddy:alpine"
+default = true
+
+[volumes]
+data = "/data"
+config = "/etc/caddy"
+
+[ports]
+main = 80
+https = 443

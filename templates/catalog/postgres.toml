@@ -1,0 +1,28 @@
+name = "postgres"
+description = "The world's most advanced open source relational database"
+category = "database"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/postgresql.png"
+
+[[versions]]
+version = "16-alpine"
+image = "postgres:16-alpine"
+default = true
+
+[[versions]]
+version = "15-alpine"
+image = "postgres:15-alpine"
+
+[[versions]]
+version = "14-alpine"
+image = "postgres:14-alpine"
+
+[env]
+POSTGRES_PASSWORD = { description = "Database password", required = true, default_value = "bosun" }
+POSTGRES_USER = { description = "Database user", required = false, default_value = "bosun" }
+POSTGRES_DB = { description = "Database name", required = false, default_value = "{name}" }
+
+[volumes]
+data = "/var/lib/postgresql/data"
+
+[ports]
+main = 5432

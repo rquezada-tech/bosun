@@ -1,0 +1,13 @@
+name = "gitlab-runner"
+description = "GitLab CI/CD job executor agent"
+category = "dev-tool"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitlab.png"
+
+[[versions]]
+version = "alpine"
+image = "gitlab/gitlab-runner:alpine"
+default = true
+
+[volumes]
+docker_socket = "/var/run/docker.sock"
+config = "/etc/gitlab-runner"

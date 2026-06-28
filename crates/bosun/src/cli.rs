@@ -78,6 +78,11 @@ impl Cli {
             Command::Rollback { app } => {
                 self.run_rollback(&mut client, app).await
             }
+            Command::Login { username, password } => {
+                self.run_login(&mut client, username, password.as_deref()).await
+            }
+            Command::Logout => self.run_logout().await,
+            Command::Whoami => self.run_whoami().await,
         }
     }
 }
@@ -133,7 +138,8 @@ impl Cli {
             AppsCmd::Create {
                 template_name,
                 name,
-            } => self.apps_create(client, template_name, name.as_deref()).await,
+                version,
+            } => self.apps_create(client, template_name, name.as_deref(), version.as_deref()).await,
         }
     }
 
@@ -276,6 +282,8 @@ impl Cli {
                     "description": t.description,
                     "category": t.category,
                     "default_port": t.default_port,
+                    "versions": t.versions,
+                    "icon": t.icon,
                 })).collect::<Vec<_>>(),
             }))?;
             println!("{json}");
@@ -292,6 +300,8 @@ impl Cli {
         struct TemplateRow {
             #[tabled(rename = "NAME")]
             name: String,
+            #[tabled(rename = "VERSIONS")]
+            versions: String,
             #[tabled(rename = "DESCRIPTION")]
             description: String,
             #[tabled(rename = "CATEGORY")]
@@ -304,6 +314,7 @@ impl Cli {
             .iter()
             .map(|t| TemplateRow {
                 name: t.name.clone(),
+                versions: t.versions.join(", "),
                 description: t.description.clone(),
                 category: t.category.clone(),
                 port: t.default_port.to_string(),
@@ -321,6 +332,7 @@ impl Cli {
         client: &mut BosunClient,
         template_name: &str,
         name_override: Option<&str>,
+        version: Option<&str>,
     ) -> anyhow::Result<()> {
         // Validate template exists by listing templates
         let templates = client.list_templates().await?;
@@ -340,12 +352,19 @@ impl Cli {
 
         let template = template.unwrap();
         let app_name = name_override.unwrap_or(template_name);
+        let version_label = version.unwrap_or("default");
 
         if !self.json {
             eprintln!(
-                "🚀 Creating '{}' from template '{}' (port: {})...",
-                app_name, template_name, template.default_port
+                "🚀 Creating '{}' from template '{}' (version: {}, port: {})...",
+                app_name, template_name, version_label, template.default_port
             );
+        }
+
+        // Pass version request through env var (server resolves it)
+        let mut env = std::collections::HashMap::new();
+        if let Some(v) = version {
+            env.insert("BOSUN_TEMPLATE_VERSION".to_string(), v.to_string());
         }
 
         let response = client
@@ -353,7 +372,7 @@ impl Cli {
                 template_name,
                 None,
                 false,
-                std::collections::HashMap::new(),
+                env,
                 Some(template.default_port),
                 DeployStrategy::Direct,
             )
@@ -666,6 +685,115 @@ impl Cli {
              Use environment variables or CLI flags instead."
         );
     }
+
+    // ── Auth ───────────────────────────────────────────────────────
+
+    async fn run_login(
+        &self,
+        client: &mut BosunClient,
+        username: &str,
+        password: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let password = match password {
+            Some(p) => p.to_string(),
+            None => {
+                // Prompt for password
+                eprint!("Password: ");
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_line(&mut input)
+                    .context("Failed to read password")?;
+                input.trim().to_string()
+            }
+        };
+
+        let response = client.login(username, &password).await?;
+        client.save_credentials(&response.token)?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "login",
+                    "username": response.username,
+                    "role": response.role,
+                    "status": "ok"
+                }))?
+            );
+        } else {
+            println!("✔ Logged in as '{}' (role: {})", response.username, response.role);
+        }
+        Ok(())
+    }
+
+    async fn run_logout(&self) -> anyhow::Result<()> {
+        let creds_path = BosunClient::credentials_path();
+        if creds_path.exists() {
+            std::fs::remove_file(&creds_path)
+                .context("Failed to remove credentials file")?;
+        }
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "logout",
+                    "status": "ok"
+                }))?
+            );
+        } else {
+            println!("✔ Logged out. Credentials removed.");
+        }
+        Ok(())
+    }
+
+    async fn run_whoami(&self) -> anyhow::Result<()> {
+        let creds = BosunClient::load_credentials()?;
+
+        match creds {
+            Some(creds) => {
+                // Decode the JWT to show info (without validating signature client-side)
+                let token_data = jsonwebtoken::decode_header(&creds.token)
+                    .context("Failed to decode token header")?;
+
+                if self.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "logged_in": true,
+                            "token_file": creds_path_display(),
+                            "token_algorithm": format!("{:?}", token_data.alg),
+                        }))?
+                    );
+                } else {
+                    let creds_path = BosunClient::credentials_path();
+                    println!("✔ Logged in");
+                    println!("  Token file: {}", creds_path.display());
+                    println!("  Token algorithm: {:?}", token_data.alg);
+                }
+            }
+            None => {
+                if self.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "logged_in": false
+                        }))?
+                    );
+                } else {
+                    println!("Not logged in. Use 'bosun login' to authenticate.");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Display helper for credentials path
+fn creds_path_display() -> String {
+    BosunClient::credentials_path().display().to_string()
 }
 
 // ── Subcommand types ──────────────────────────────────────────────
@@ -714,6 +842,18 @@ pub enum Command {
         /// App name to rollback
         app: String,
     },
+    /// Log in to the bosun daemon
+    Login {
+        /// Username
+        username: String,
+        /// Password (prompts if not provided)
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Log out (remove saved credentials)
+    Logout,
+    /// Show current login info
+    Whoami,
 }
 
 #[derive(Subcommand)]
@@ -741,6 +881,9 @@ pub enum AppsCmd {
         /// Custom app name (defaults to template name if omitted)
         #[arg(long)]
         name: Option<String>,
+        /// Specific version to deploy (defaults to the template's default version)
+        #[arg(long)]
+        version: Option<String>,
     },
     /// List available one-click app templates
     Templates,

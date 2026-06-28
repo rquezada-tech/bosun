@@ -1,21 +1,33 @@
 //! gRPC client wrapper for the Bosun daemon.
 //!
 //! Provides a typed async client that handles connection, TLS,
-//! and timeout logic.
+//! credentials, and timeout logic.
 
 use anyhow::Context;
 use crate::proto::bosun::v1::bosun_client::BosunClient as GrpcBosunClient;
 use crate::proto::bosun::v1::*;
+use std::path::PathBuf;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Identity};
 use std::time::Duration;
+
+/// Credentials stored in ~/.bosun/credentials
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Credentials {
+    pub token: String,
+    pub username: String,
+    pub role: String,
+}
 
 /// Wrapper around the gRPC BosunClient with convenient methods.
 pub struct BosunClient {
     inner: GrpcBosunClient<Channel>,
+    /// Auth token loaded from credentials file (if logged in)
+    token: Option<String>,
 }
 
 impl BosunClient {
-    /// Connect to the bosun daemon at `addr`.
+    /// Connect to the bosun daemon at `addr`, loading credentials from
+    /// `~/.bosun/credentials` if available.
     ///
     /// `addr` should include the scheme, e.g. `https://localhost:9090` or
     /// `http://localhost:9090`. If the scheme is `https`, TLS is enabled.
@@ -66,18 +78,99 @@ impl BosunClient {
                 })?
         };
 
+        // Load credentials from ~/.bosun/credentials
+        let token = Self::load_credentials()?.map(|c| c.token);
+
         Ok(Self {
             inner: GrpcBosunClient::new(channel),
+            token,
         })
+    }
+
+    /// Path to the credentials file: ~/.bosun/credentials
+    pub fn credentials_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home).join(".bosun").join("credentials")
+    }
+
+    /// Load credentials from ~/.bosun/credentials
+    pub fn load_credentials() -> anyhow::Result<Option<Credentials>> {
+        let path = Self::credentials_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read credentials from {}", path.display()))?;
+        let creds: Credentials = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse credentials from {}", path.display()))?;
+        Ok(Some(creds))
+    }
+
+    /// Save credentials to ~/.bosun/credentials
+    pub fn save_credentials(&self, token: &str) -> anyhow::Result<()> {
+        let path = Self::credentials_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let creds = Credentials {
+            token: token.to_string(),
+            username: "".to_string(), // Will be filled by the login response in the CLI
+            role: "".to_string(),
+        };
+        let json = serde_json::to_string_pretty(&creds)?;
+        std::fs::write(&path, json)?;
+        Ok(())
+    }
+
+    /// Add the auth token as a gRPC metadata header.
+    fn auth_request<T>(&self, mut request: tonic::Request<T>) -> tonic::Request<T> {
+        if let Some(ref token) = self.token {
+            let bearer = format!("Bearer {}", token);
+            if let Ok(metadata_value) = bearer.parse() {
+                request.metadata_mut().insert(
+                    "authorization",
+                    metadata_value,
+                );
+            }
+        }
+        request
+    }
+
+    // ── Auth ───────────────────────────────────────────────────────
+
+    /// Login to the bosun daemon and get a JWT token.
+    pub async fn login(
+        &mut self,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<LoginResponse> {
+        let request = tonic::Request::new(LoginRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+        });
+        // No auth header for login request
+
+        let response = self
+            .inner
+            .login(request)
+            .await
+            .context("gRPC Login failed")?
+            .into_inner();
+
+        // Store the token for subsequent requests
+        self.token = Some(response.token.clone());
+
+        Ok(response)
     }
 
     // ── App management ────────────────────────────────────────────
 
     /// List all deployed applications.
     pub async fn list_apps(&mut self) -> anyhow::Result<Vec<App>> {
+        let request = self.auth_request(tonic::Request::new(ListAppsRequest {}));
         let response = self
             .inner
-            .list_apps(ListAppsRequest {})
+            .list_apps(request)
             .await
             .context("gRPC ListApps failed")?
             .into_inner();
@@ -91,13 +184,14 @@ impl BosunClient {
         follow: bool,
         tail_lines: u32,
     ) -> anyhow::Result<tonic::Streaming<LogEntry>> {
+        let request = self.auth_request(tonic::Request::new(GetAppLogsRequest {
+            app_name: app_name.to_string(),
+            follow,
+            tail_lines,
+        }));
         let response = self
             .inner
-            .get_app_logs(GetAppLogsRequest {
-                app_name: app_name.to_string(),
-                follow,
-                tail_lines,
-            })
+            .get_app_logs(request)
             .await
             .context(format!("gRPC GetAppLogs failed for '{app_name}'"))?
             .into_inner();
@@ -106,10 +200,11 @@ impl BosunClient {
 
     /// Restart an application.
     pub async fn restart_app(&mut self, app_name: &str) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(RestartAppRequest {
+            app_name: app_name.to_string(),
+        }));
         self.inner
-            .restart_app(RestartAppRequest {
-                app_name: app_name.to_string(),
-            })
+            .restart_app(request)
             .await
             .context(format!("gRPC RestartApp failed for '{app_name}'"))?;
         Ok(())
@@ -117,11 +212,12 @@ impl BosunClient {
 
     /// Scale an application to the given number of instances.
     pub async fn scale_app(&mut self, app_name: &str, instances: u32) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(ScaleAppRequest {
+            app_name: app_name.to_string(),
+            instances,
+        }));
         self.inner
-            .scale_app(ScaleAppRequest {
-                app_name: app_name.to_string(),
-                instances,
-            })
+            .scale_app(request)
             .await
             .context(format!(
                 "gRPC ScaleApp failed for '{app_name}' to {instances} instances"
@@ -141,16 +237,17 @@ impl BosunClient {
         port: Option<u32>,
         strategy: DeployStrategy,
     ) -> anyhow::Result<DeployResponse> {
+        let request = self.auth_request(tonic::Request::new(DeployRequest {
+            context_path: context_path.to_string(),
+            domain: domain.map(|s| s.to_string()),
+            enable_ssl,
+            env,
+            port,
+            strategy: strategy.into(),
+        }));
         let response = self
             .inner
-            .deploy(DeployRequest {
-                context_path: context_path.to_string(),
-                domain: domain.map(|s| s.to_string()),
-                enable_ssl,
-                env,
-                port,
-                strategy: strategy.into(),
-            })
+            .deploy(request)
             .await
             .context(format!("gRPC Deploy failed for '{context_path}'"))?
             .into_inner();
@@ -164,12 +261,13 @@ impl BosunClient {
         &mut self,
         app_name: Option<&str>,
     ) -> anyhow::Result<Vec<AppMetric>> {
+        let request = self.auth_request(tonic::Request::new(GetMetricsRequest {
+            app_name: app_name.map(|s| s.to_string()),
+            live: false,
+        }));
         let response = self
             .inner
-            .get_metrics(GetMetricsRequest {
-                app_name: app_name.map(|s| s.to_string()),
-                live: false,
-            })
+            .get_metrics(request)
             .await
             .context("gRPC GetMetrics failed")?
             .into_inner();
@@ -181,12 +279,13 @@ impl BosunClient {
         &mut self,
         app_name: Option<&str>,
     ) -> anyhow::Result<tonic::Streaming<AppMetric>> {
+        let request = self.auth_request(tonic::Request::new(GetMetricsRequest {
+            app_name: app_name.map(|s| s.to_string()),
+            live: true,
+        }));
         let response = self
             .inner
-            .stream_metrics(GetMetricsRequest {
-                app_name: app_name.map(|s| s.to_string()),
-                live: true,
-            })
+            .stream_metrics(request)
             .await
             .context("gRPC StreamMetrics failed")?
             .into_inner();
@@ -200,11 +299,12 @@ impl BosunClient {
         &mut self,
         app_name: &str,
     ) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let request = self.auth_request(tonic::Request::new(GetEnvRequest {
+            app_name: app_name.to_string(),
+        }));
         let response = self
             .inner
-            .get_env(GetEnvRequest {
-                app_name: app_name.to_string(),
-            })
+            .get_env(request)
             .await
             .context(format!("gRPC GetEnv failed for '{app_name}'"))?
             .into_inner();
@@ -213,12 +313,13 @@ impl BosunClient {
 
     /// Set an environment variable for an app.
     pub async fn set_env(&mut self, app_name: &str, key: &str, value: &str) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(SetEnvRequest {
+            app_name: app_name.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        }));
         self.inner
-            .set_env(SetEnvRequest {
-                app_name: app_name.to_string(),
-                key: key.to_string(),
-                value: value.to_string(),
-            })
+            .set_env(request)
             .await
             .context(format!("gRPC SetEnv failed for '{app_name}': {key}={value}"))?;
         Ok(())
@@ -226,11 +327,12 @@ impl BosunClient {
 
     /// Remove an environment variable from an app.
     pub async fn unset_env(&mut self, app_name: &str, key: &str) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(UnsetEnvRequest {
+            app_name: app_name.to_string(),
+            key: key.to_string(),
+        }));
         self.inner
-            .unset_env(UnsetEnvRequest {
-                app_name: app_name.to_string(),
-                key: key.to_string(),
-            })
+            .unset_env(request)
             .await
             .context(format!("gRPC UnsetEnv failed for '{app_name}': {key}"))?;
         Ok(())
@@ -240,9 +342,10 @@ impl BosunClient {
 
     /// List available one-click app templates.
     pub async fn list_templates(&mut self) -> anyhow::Result<Vec<TemplateInfo>> {
+        let request = self.auth_request(tonic::Request::new(ListTemplatesRequest {}));
         let response = self
             .inner
-            .list_templates(ListTemplatesRequest {})
+            .list_templates(request)
             .await
             .context("gRPC ListTemplates failed")?
             .into_inner();
@@ -251,11 +354,12 @@ impl BosunClient {
 
     /// Rollback an app (blue-green switch or no-op for other strategies).
     pub async fn rollback_app(&mut self, app_name: &str) -> anyhow::Result<RollbackAppResponse> {
+        let request = self.auth_request(tonic::Request::new(RollbackAppRequest {
+            app_name: app_name.to_string(),
+        }));
         let response = self
             .inner
-            .rollback_app(RollbackAppRequest {
-                app_name: app_name.to_string(),
-            })
+            .rollback_app(request)
             .await
             .context(format!("gRPC RollbackApp failed for '{app_name}'"))?
             .into_inner();

@@ -1,0 +1,20 @@
+name = "rabbitmq"
+description = "Open source message broker that implements AMQP"
+category = "queue"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/rabbitmq.png"
+
+[[versions]]
+version = "3-management-alpine"
+image = "rabbitmq:3-management-alpine"
+default = true
+
+[env]
+RABBITMQ_DEFAULT_USER = { required = false }
+RABBITMQ_DEFAULT_PASS = { required = false }
+
+[volumes]
+data = "/var/lib/rabbitmq"
+
+[ports]
+main = 5672
+management = 15672
