@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.env
+*.pem
+*.key
+*.crt
+.DS_Store

@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bosun",
+    "crates/bosun-daemon",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Rodrigo Quezada <rquezada@codehub.cl>"]
+repository = "https://github.com/rquezada-tech/bosun"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# gRPC
+tonic = "0.13"
+prost = "0.13"
+tonic-build = "0.13"
+
+# Docker API
+bollard = "0.18"
+
+# TLS / crypto
+rustls = "0.23"
+rustls-pemfile = "2"
+
+# CLI output formatting
+tabled = "0.18"
+indicatif = "0.17"
+
+# Logging + tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# SQLite for persistence (optional, lightweight)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Templating (config files, nginx config generation)
+tera = "1"
+
+# Stream utilities (for Docker build output + metrics streaming)
+futures-util = "0.3"
+# Tar creation for Docker build contexts
+tar = "0.4"
+
+# ACME / Let's Encrypt
+# instant-acme = "0.6"  # uncomment when ready for SSL module

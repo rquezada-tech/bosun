@@ -1,0 +1,102 @@
+//! gRPC server implementation.
+//!
+//! Implements the Bosun service defined in proto/bosun/v1/bosun.proto.
+
+pub mod v1 {
+    tonic::include_proto!("bosun.v1");
+}
+
+use v1::bosun_server::{Bosun, BosunServer};
+use v1::*;
+use tonic::{Request, Response, Status, Streaming};
+
+pub struct BosunService {
+    pub docker: std::sync::Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
+}
+
+impl BosunService {
+    pub fn new(docker: crate::docker::DockerClient) -> Self {
+        Self {
+            docker: std::sync::Arc::new(tokio::sync::Mutex::new(docker)),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl Bosun for BosunService {
+    async fn list_apps(
+        &self,
+        _request: Request<ListAppsRequest>,
+    ) -> Result<Response<ListAppsResponse>, Status> {
+        let docker = self.docker.lock().await;
+        let apps = docker.list_bosun_apps().await.map_err(|e| {
+            Status::internal(format!("Failed to list containers: {}", e))
+        })?;
+        Ok(Response::new(ListAppsResponse { apps }))
+    }
+
+    type GetAppLogsStream = tonic::codec::Streaming<LogEntry>;
+    async fn get_app_logs(
+        &self,
+        _request: Request<GetAppLogsRequest>,
+    ) -> Result<Response<Self::GetAppLogsStream>, Status> {
+        todo!("get_app_logs — Task 3/5")
+    }
+
+    async fn restart_app(
+        &self,
+        _request: Request<RestartAppRequest>,
+    ) -> Result<Response<RestartAppResponse>, Status> {
+        todo!("restart_app")
+    }
+
+    async fn scale_app(
+        &self,
+        _request: Request<ScaleAppRequest>,
+    ) -> Result<Response<ScaleAppResponse>, Status> {
+        todo!("scale_app")
+    }
+
+    async fn deploy(
+        &self,
+        _request: Request<DeployRequest>,
+    ) -> Result<Response<DeployResponse>, Status> {
+        todo!("deploy — Task 3")
+    }
+
+    async fn get_metrics(
+        &self,
+        _request: Request<GetMetricsRequest>,
+    ) -> Result<Response<GetMetricsResponse>, Status> {
+        todo!("get_metrics — Task 4")
+    }
+
+    type StreamMetricsStream = tonic::codec::Streaming<AppMetric>;
+    async fn stream_metrics(
+        &self,
+        _request: Request<GetMetricsRequest>,
+    ) -> Result<Response<Self::StreamMetricsStream>, Status> {
+        todo!("stream_metrics — Task 4")
+    }
+
+    async fn get_env(
+        &self,
+        _request: Request<GetEnvRequest>,
+    ) -> Result<Response<GetEnvResponse>, Status> {
+        todo!("get_env")
+    }
+
+    async fn set_env(
+        &self,
+        _request: Request<SetEnvRequest>,
+    ) -> Result<Response<SetEnvResponse>, Status> {
+        todo!("set_env")
+    }
+
+    async fn unset_env(
+        &self,
+        _request: Request<UnsetEnvRequest>,
+    ) -> Result<Response<UnsetEnvResponse>, Status> {
+        todo!("unset_env")
+    }
+}

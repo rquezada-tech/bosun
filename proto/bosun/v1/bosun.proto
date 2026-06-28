@@ -1,0 +1,137 @@
+//! Shared protobuf definitions for Bosun gRPC API.
+//!
+//! This proto file is compiled by tonic-build during build.
+//! Service methods are split across the two crates:
+//!   - Server implementation: crates/bosun-daemon/src/server/
+//!   - Client usage:         crates/bosun/src/api/
+//!
+//! Design principle: keep the API minimal. Every call
+//! should return actionable data, not dashboard fluff.
+
+syntax = "proto3";
+
+package bosun.v1;
+
+// --- Core entities ---
+
+message App {
+    string name = 1;
+    AppStatus status = 2;
+    optional string domain = 3;
+    optional uint32 port = 4;
+    optional uint32 instances = 5;
+    repeated string env_keys = 6;
+}
+
+enum AppStatus {
+    APP_STATUS_UNKNOWN = 0;
+    APP_STATUS_RUNNING = 1;
+    APP_STATUS_STOPPED = 2;
+    APP_STATUS_DEPLOYING = 3;
+    APP_STATUS_FAILED = 4;
+}
+
+message AppMetric {
+    string app_name = 1;
+    double cpu_percent = 2;
+    uint64 ram_bytes = 3;
+    uint64 net_rx_bytes = 4;
+    uint64 net_tx_bytes = 5;
+    uint64 timestamp_unix = 6;
+}
+
+message DeployRequest {
+    string context_path = 1;      // path on server (already uploaded)
+    optional string domain = 2;
+    bool enable_ssl = 3;
+    map<string, string> env = 4;
+    optional uint32 port = 5;
+}
+
+message DeployResponse {
+    string app_name = 1;
+    string status = 2;
+}
+
+message LogEntry {
+    uint64 timestamp_unix = 1;
+    string message = 2;
+    // stream: stdout | stderr
+    string stream = 3;
+}
+
+// --- Services ---
+
+service Bosun {
+    // App management
+    rpc ListApps(ListAppsRequest) returns (ListAppsResponse);
+    rpc GetAppLogs(GetAppLogsRequest) returns (stream LogEntry);
+    rpc RestartApp(RestartAppRequest) returns (RestartAppResponse);
+    rpc ScaleApp(ScaleAppRequest) returns (ScaleAppResponse);
+
+    // Deployment
+    rpc Deploy(DeployRequest) returns (DeployResponse);
+
+    // Metrics
+    rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+    rpc StreamMetrics(GetMetricsRequest) returns (stream AppMetric);
+
+    // Environment
+    rpc GetEnv(GetEnvRequest) returns (GetEnvResponse);
+    rpc SetEnv(SetEnvRequest) returns (SetEnvResponse);
+    rpc UnsetEnv(UnsetEnvRequest) returns (UnsetEnvResponse);
+}
+
+// --- Request / Response messages ---
+
+message ListAppsRequest {}
+message ListAppsResponse {
+    repeated App apps = 1;
+}
+
+message GetAppLogsRequest {
+    string app_name = 1;
+    bool follow = 2;
+    uint32 tail_lines = 3;
+}
+// returns stream LogEntry
+
+message RestartAppRequest {
+    string app_name = 1;
+}
+message RestartAppResponse {}
+
+message ScaleAppRequest {
+    string app_name = 1;
+    uint32 instances = 2;
+}
+message ScaleAppResponse {}
+
+message GetMetricsRequest {
+    // empty = all apps; set app_name for a single app
+    optional string app_name = 1;
+    bool live = 2;
+}
+message GetMetricsResponse {
+    repeated AppMetric metrics = 1;
+}
+
+message GetEnvRequest {
+    string app_name = 1;
+}
+message GetEnvResponse {
+    map<string, string> env = 1;
+}
+
+message SetEnvRequest {
+    string app_name = 1;
+    string key = 2;
+    string value = 3;
+}
+message SetEnvResponse {}
+
+message UnsetEnvRequest {
+    string app_name = 1;
+    string key = 2;
+}
+message UnsetEnvResponse {}
