@@ -3,11 +3,16 @@
 //! Connects to the local Docker daemon via bollard
 //! and provides Bosun-specific operations.
 
+use std::collections::HashMap;
+use std::path::Path;
+
 use bollard::Docker;
 use bollard::container::{
-    ListContainersOptions, LogOutput, LogsOptions, RestartContainerOptions,
-    StopContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, LogOutput, LogsOptions,
+    RemoveContainerOptions, RestartContainerOptions, StopContainerOptions,
 };
+use bollard::image::BuildImageOptions;
+use bollard::models::{HostConfig, PortBinding};
 use bollard::secret::ContainerSummary;
 use crate::server::v1::{App, AppStatus, LogEntry};
 use futures_util::StreamExt;
@@ -137,6 +142,153 @@ impl DockerClient {
             );
         }
         tracing::info!("Scale app '{}' to {} instances (no-op for MVP)", name, instances);
+        Ok(())
+    }
+
+    /// Create a tarball of a directory (for Docker build context).
+    fn create_build_tar(build_dir: &Path) -> anyhow::Result<Vec<u8>> {
+        let mut tar_buf = Vec::new();
+        {
+            let mut tar = tar::Builder::new(&mut tar_buf);
+            tar.append_dir_all(".", build_dir)?;
+            tar.finish()?;
+        }
+        Ok(tar_buf)
+    }
+
+    /// Deploy an app: build Docker image from build_dir, create + run container.
+    pub async fn deploy(
+        &self,
+        build_dir: &Path,
+        app_name: &str,
+        domain: Option<&str>,
+        port: u16,
+        env_vars: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Deploying app '{}' from {} (domain={:?}, port={})",
+            app_name,
+            build_dir.display(),
+            domain,
+            port
+        );
+
+        // 1. Create tar of build directory
+        let tar_bytes = Self::create_build_tar(build_dir)?;
+        tracing::info!("Created build context tar ({} bytes)", tar_bytes.len());
+
+        // 2. Build Docker image
+        let build_options = BuildImageOptions {
+            dockerfile: "Dockerfile".to_string(),
+            t: app_name.to_string(),
+            ..Default::default()
+        };
+
+        tracing::info!("Building Docker image '{}'...", app_name);
+        let mut build_stream = self.inner.build_image(
+            build_options,
+            None,
+            Some(bytes::Bytes::from(tar_bytes)),
+        );
+
+        while let Some(result) = build_stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(stream) = &info.stream {
+                        tracing::debug!("build: {}", stream.trim());
+                    }
+                    if let Some(error) = &info.error {
+                        anyhow::bail!("Docker build error: {}", error.trim());
+                    }
+                }
+                Err(e) => {
+                    anyhow::bail!("Docker build stream error: {}", e);
+                }
+            }
+        }
+        tracing::info!("Docker image '{}' built successfully", app_name);
+
+        // 3. Remove old container if it exists
+        match self
+            .inner
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(_) => tracing::info!("Removed existing container '{}'", app_name),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
+                // Container didn't exist, that's fine
+                tracing::debug!("No existing container '{}' to remove", app_name);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to remove old container '{}': {} (continuing)", app_name, e);
+            }
+        }
+
+        // 4. Build container config
+        let port_binding = format!("{}/tcp", port);
+        let mut exposed_ports = HashMap::new();
+        exposed_ports.insert(port_binding.clone(), HashMap::new());
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            port_binding.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(port.to_string()),
+            }]),
+        );
+
+        let mut labels = HashMap::new();
+        labels.insert("managed-by".to_string(), "bosun".to_string());
+        labels.insert("bosun.app".to_string(), app_name.to_string());
+        if let Some(d) = domain {
+            labels.insert("bosun.domain".to_string(), d.to_string());
+        }
+        labels.insert("bosun.port".to_string(), port.to_string());
+
+        // Convert env_vars to "KEY=VALUE" strings
+        let env: Vec<String> = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        let config = Config {
+            image: Some(app_name.to_string()),
+            exposed_ports: Some(exposed_ports),
+            env: Some(env),
+            labels: Some(labels),
+            host_config: Some(HostConfig {
+                port_bindings: Some(port_bindings),
+                restart_policy: Some(bollard::models::RestartPolicy {
+                    name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: Some(3),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let create_options = CreateContainerOptions {
+            name: app_name.to_string(),
+            ..Default::default()
+        };
+
+        // 5. Create and start container
+        tracing::info!("Creating container '{}'...", app_name);
+        let container = self.inner.create_container(Some(create_options), config).await?;
+        tracing::info!("Container '{}' created (id={})", app_name, container.id);
+
+        self.inner.start_container::<String>(app_name, None).await?;
+        tracing::info!("Container '{}' started successfully", app_name);
+
         Ok(())
     }
 }

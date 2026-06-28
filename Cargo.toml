@@ -30,6 +30,7 @@ tonic-build = "0.13"
 
 # Docker API
 bollard = "0.18"
+bytes = "1"
 
 # TLS / crypto
 rustls = "0.23"

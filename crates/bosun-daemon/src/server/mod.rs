@@ -64,9 +64,44 @@ impl Bosun for BosunService {
 
     async fn deploy(
         &self,
-        _request: Request<DeployRequest>,
+        request: Request<DeployRequest>,
     ) -> Result<Response<DeployResponse>, Status> {
-        todo!("deploy — Task 3")
+        let req = request.into_inner();
+        // Derive app name from context path directory name
+        let app_name = std::path::Path::new(&req.context_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app")
+            .to_string();
+        let port = req.port.unwrap_or(8080) as u16;
+        let domain = req.domain.as_deref();
+
+        let env_vars: std::collections::HashMap<String, String> = req.env;
+
+        tracing::info!(
+            "Deploy request: app={}, path={}, domain={:?}, port={}",
+            app_name,
+            req.context_path,
+            domain,
+            port
+        );
+
+        let docker = self.docker.lock().await;
+        docker
+            .deploy(
+                std::path::Path::new(&req.context_path),
+                &app_name,
+                domain,
+                port,
+                &env_vars,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
+
+        Ok(Response::new(DeployResponse {
+            app_name,
+            status: "deployed".to_string(),
+        }))
     }
 
     async fn get_metrics(

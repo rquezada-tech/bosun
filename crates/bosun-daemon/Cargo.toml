@@ -18,6 +18,7 @@ serde_json.workspace = true
 tonic.workspace = true
 prost.workspace = true
 bollard.workspace = true
+bytes.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
