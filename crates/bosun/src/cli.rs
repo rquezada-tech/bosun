@@ -63,7 +63,6 @@ mod color {
     pub const GREEN: &str = "\x1b[32m";
     pub const RED: &str = "\x1b[31m";
     pub const YELLOW: &str = "\x1b[33m";
-    pub const CYAN: &str = "\x1b[36m";
     pub const BOLD: &str = "\x1b[1m";
     pub const RESET: &str = "\x1b[0m";
 }
@@ -100,10 +99,10 @@ impl Cli {
         match sub {
             AppsCmd::List => self.apps_list(client).await,
             AppsCmd::Logs { app, follow, tail } => {
-                self.apps_logs(client, &app, follow, tail).await
+                self.apps_logs(client, app, *follow, *tail).await
             }
-            AppsCmd::Restart { app } => self.apps_restart(client, &app).await,
-            AppsCmd::Scale { app, instances } => self.apps_scale(client, &app, instances).await,
+            AppsCmd::Restart { app } => self.apps_restart(client, app).await,
+            AppsCmd::Scale { app, instances } => self.apps_scale(client, app, *instances).await,
         }
     }
 
@@ -375,9 +374,9 @@ impl Cli {
 
     async fn run_env(&self, client: &mut BosunClient, sub: &EnvCmd) -> anyhow::Result<()> {
         match sub {
-            EnvCmd::List { app } => self.env_list(client, &app).await,
-            EnvCmd::Set { app, key, value } => self.env_set(client, &app, &key, &value).await,
-            EnvCmd::Unset { app, key } => self.env_unset(client, &app, &key).await,
+            EnvCmd::List { app } => self.env_list(client, app).await,
+            EnvCmd::Set { app, key, value } => self.env_set(client, app, key, value).await,
+            EnvCmd::Unset { app, key } => self.env_unset(client, app, key).await,
         }
     }
 
@@ -454,7 +453,7 @@ impl Cli {
     async fn run_config(&self, sub: &ConfigCmd) -> anyhow::Result<()> {
         match sub {
             ConfigCmd::Show => self.config_show().await,
-            ConfigCmd::Set { key, value } => self.config_set(&key, &value).await,
+            ConfigCmd::Set { key, value } => self.config_set(key, value).await,
         }
     }
 
