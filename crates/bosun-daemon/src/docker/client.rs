@@ -995,6 +995,7 @@ impl DockerClient {
 
     /// Promote the current blue-green deploy: remove the inactive color container,
     /// making the current active color permanent.
+    #[allow(dead_code)]
     pub async fn promote_blue_green(&self, app_name: &str) -> anyhow::Result<String> {
         let (active_color, inactive_color) = self.determine_blue_green_colors(app_name).await?;
         let inactive_name = format!("{}-{}", app_name, inactive_color);

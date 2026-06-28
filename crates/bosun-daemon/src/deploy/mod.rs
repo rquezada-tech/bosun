@@ -24,6 +24,7 @@ pub enum DeployStrategy {
 impl DeployStrategy {
     /// Parse from a string (case-insensitive).
     /// Defaults to Direct for unknown values.
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "direct" => DeployStrategy::Direct,
@@ -180,6 +181,7 @@ pub async fn execute_rollback(
 /// Execute a promote for a blue-green deployed app.
 ///
 /// Removes the inactive color container, making the active color permanent.
+#[allow(dead_code)]
 pub async fn execute_promote(
     docker: &DockerClient,
     app_name: &str,

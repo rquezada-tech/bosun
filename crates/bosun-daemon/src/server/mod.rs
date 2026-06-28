@@ -296,26 +296,21 @@ impl Bosun for BosunService {
                 let has_blue_green = labels.get("bosun.strategy").map(|s| s.as_str()) == Some("blue_green");
 
                 if has_blue_green {
-                    // Perform blue-green rollback: switch to inactive color
-                    match docker.rollback_blue_green(&req.app_name).await {
-                        Ok((color, _port)) => {
-                            tracing::info!(
-                                "Blue-green rollback successful for '{}' (switched to {})",
-                                req.app_name, color
-                            );
-                            Ok(Response::new(RollbackAppResponse {
-                                status: "rolled_back".to_string(),
-                                message: format!(
-                                    "App '{}' rolled back to previous color ({})",
-                                    req.app_name, color
-                                ),
-                            }))
-                        }
-                        Err(e) => {
-                            tracing::error!("Rollback failed for '{}': {}", req.app_name, e);
-                            Err(Status::internal(format!("Rollback failed: {}", e)))
-                        }
-                    }
+                    // Use the strategy dispatcher to handle rollback + Caddy swap
+                    let domain = labels.get("bosun.domain").cloned();
+                    let proxy = self.proxy.as_deref();
+
+                    crate::deploy::execute_rollback(&docker, proxy, &req.app_name, domain.as_deref())
+                        .await
+                        .map_err(|e| Status::internal(format!("Rollback failed: {}", e)))?;
+
+                    Ok(Response::new(RollbackAppResponse {
+                        status: "rolled_back".to_string(),
+                        message: format!(
+                            "App '{}' rolled back to previous color",
+                            req.app_name
+                        ),
+                    }))
                 } else {
                     // No blue-green setup — can't rollback
                     tracing::info!(
