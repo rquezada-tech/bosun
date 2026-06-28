@@ -212,6 +212,7 @@ impl CaddyClient {
     ///
     /// Convenience wrapper around [`remove_app`] used during container
     /// stop/removal flows. Does not error if the route doesn't exist.
+    #[allow(dead_code)]
     pub async fn cleanup_app(&self, domain: &str) -> anyhow::Result<()> {
         self.remove_app(domain).await
     }
@@ -219,6 +220,7 @@ impl CaddyClient {
     /// List all currently configured routes.
     ///
     /// Returns the raw JSON config from Caddy for debugging/inspection.
+    #[allow(dead_code)]
     pub async fn list_routes(&self) -> anyhow::Result<String> {
         let url = format!("{}/config/", self.base_url);
         let resp = self
