@@ -68,16 +68,6 @@ struct Args {
     /// Directory containing TOML template catalog files
     #[arg(long, default_value = "templates/catalog")]
     templates_dir: String,
-
-    /// MCP server listen address (default 127.0.0.1:9092)
-    #[arg(long, default_value = "127.0.0.1:9092", env = "BOSUN_MCP_LISTEN")]
-    mcp_listen: String,
-
-    /// MCP API key for authentication.
-    /// If set, validates X-API-Key header on all MCP requests.
-    /// If not set, MCP server only listens on 127.0.0.1 (local only).
-    #[arg(long, env = "BOSUN_MCP_API_KEY")]
-    mcp_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -216,6 +206,8 @@ async fn main() -> anyhow::Result<()> {
     // Initialize security (CrowdSec or Fail2Ban auto-detect)
     let security = security::SecurityService::detect();
     tracing::info!("Security engine: {}", security.engine().as_str());
+
+    let backup_service = backup_service;
 
     let bosun_service = server::BosunService::new(
         docker_arc,

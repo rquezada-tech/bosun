@@ -32,6 +32,7 @@ pub struct BackupMetadata {
 }
 
 /// Service that handles backup creation, listing, and restoration.
+#[derive(Clone)]
 pub struct BackupService {
     /// Root directory for backups: {data_dir}/backups
     backups_dir: PathBuf,

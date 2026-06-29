@@ -61,6 +61,7 @@ pub struct SecurityDecision {
 }
 
 /// Service for detecting and configuring IDS/IPS engines.
+#[derive(Debug, Clone)]
 pub struct SecurityService {
     engine: SecurityEngine,
 }

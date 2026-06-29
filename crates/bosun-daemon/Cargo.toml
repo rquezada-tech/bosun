@@ -39,6 +39,7 @@ bcrypt.workspace = true
 chrono.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
+tokio-util = "0.7"
 
 # Uncomment when ready
 # instant-acme.workspace = true
