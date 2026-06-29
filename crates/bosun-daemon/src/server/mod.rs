@@ -39,27 +39,27 @@ pub struct BosunService {
 impl BosunService {
     pub fn new(
         docker: Arc<tokio::sync::Mutex<crate::docker::DockerClient>>,
-        metrics: crate::metrics::MetricCollector,
+        metrics: Arc<crate::metrics::MetricCollector>,
         store: Arc<crate::persist::Store>,
         proxy: Option<crate::proxy::CaddyClient>,
         gateway: Option<crate::gateway::GatewayClient>,
         restart_counts: crate::health::RestartCounts,
         auth_service: Arc<crate::auth::AuthService>,
         catalog: Arc<crate::templates::Catalog>,
-        backup: crate::backup::BackupService,
+        backup: Arc<crate::backup::BackupService>,
         security: crate::security::SecurityService,
     ) -> Self {
         let cluster = crate::cluster::ClusterController::new(store.clone());
         Self {
             docker,
-            metrics: Arc::new(metrics),
+            metrics,
             store,
             proxy: proxy.map(Arc::new),
             gateway,
             restart_counts,
             auth_service,
             catalog,
-            backup: Arc::new(backup),
+            backup,
             security,
             cluster,
         }

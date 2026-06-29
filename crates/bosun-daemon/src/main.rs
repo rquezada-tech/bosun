@@ -68,6 +68,14 @@ struct Args {
     /// Directory containing TOML template catalog files
     #[arg(long, default_value = "templates/catalog")]
     templates_dir: String,
+
+    /// MCP HTTP server listen address (for LLM agent integration)
+    #[arg(long, default_value = "127.0.0.1:9092")]
+    mcp_listen: String,
+
+    /// MCP API key for authenticating LLM agent requests
+    #[arg(long, env = "BOSUN_MCP_API_KEY")]
+    mcp_api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -163,11 +171,11 @@ async fn main() -> anyhow::Result<()> {
     health_checker.start();
 
     // Create metric collector (shares the Docker connection)
-    let metrics = metrics::MetricCollector::new(docker_inner);
+    let metrics = Arc::new(metrics::MetricCollector::new(docker_inner));
 
     // Initialize backup service
     let data_dir_path = PathBuf::from(&args.data_dir);
-    let backup_service = backup::BackupService::new(&data_dir_path, docker_arc.clone());
+    let backup_service = Arc::new(backup::BackupService::new(&data_dir_path, docker_arc.clone()));
     tracing::info!("Backup directory: {}", data_dir_path.join("backups").display());
 
     // Create the gRPC service (with auth)
@@ -207,19 +215,17 @@ async fn main() -> anyhow::Result<()> {
     let security = security::SecurityService::detect();
     tracing::info!("Security engine: {}", security.engine().as_str());
 
-    let backup_service = backup_service;
-
     let bosun_service = server::BosunService::new(
-        docker_arc,
-        metrics,
+        docker_arc.clone(),
+        metrics.clone(),
         store,
         proxy,
-        gateway,
+        gateway.clone(),
         restart_counts,
         auth_service.clone(),
         catalog,
-        backup_service,
-        security,
+        backup_service.clone(),
+        security.clone(),
     );
 
     // Build the gRPC server with auth interceptor
@@ -247,6 +253,33 @@ async fn main() -> anyhow::Result<()> {
         .add_service(server::v1::bosun_server::BosunServer::new(bosun_service));
 
     tracing::info!("gRPC server listening on {}", args.listen);
+
+    // Start MCP HTTP server for LLM agent integration
+    let mcp_state = Arc::new(mcp::McpState {
+        docker: docker_arc.clone(),
+        metrics: metrics.clone(),
+        backup: backup_service.clone(),
+        security: security.clone(),
+        gateway: gateway.clone(),
+        api_key: args.mcp_api_key.clone(),
+    });
+    let mcp_listen = args.mcp_listen.clone();
+    let mcp_handle = tokio::spawn(async move {
+        let app = mcp::router(mcp_state);
+        let listener = match tokio::net::TcpListener::bind(&mcp_listen).await {
+            Ok(l) => {
+                tracing::info!("MCP server listening on http://{}/mcp", mcp_listen);
+                l
+            }
+            Err(e) => {
+                tracing::error!("Failed to bind MCP server to {}: {}", mcp_listen, e);
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("MCP server error: {}", e);
+        }
+    });
 
     // Start webhook HTTP server in a separate tokio task
     let webhook_docker = Arc::new(tokio::sync::Mutex::new(docker_webhook));
@@ -278,6 +311,10 @@ async fn main() -> anyhow::Result<()> {
     // Cancel webhook server when gRPC shuts down
     webhook_handle.abort();
     tracing::info!("Webhook server stopped");
+
+    // Cancel MCP server
+    mcp_handle.abort();
+    tracing::info!("MCP server stopped");
 
     tracing::info!("Server shut down gracefully");
     Ok(())

@@ -17,7 +17,9 @@ ExecStart=/usr/local/bin/bosun-daemon \
     --key /etc/bosun/server.key \
     --jwt-secret $(cat /etc/bosun/jwt-secret) \
     --webhook-listen 0.0.0.0:9091 \
-    --webhook-secret $(cat /etc/bosun/webhook-secret)
+    --webhook-secret $(cat /etc/bosun/webhook-secret) \
+    --mcp-listen 127.0.0.1:9092 \
+    --mcp-api-key $(cat /etc/bosun/mcp-api-key)
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=bosun_daemon=info

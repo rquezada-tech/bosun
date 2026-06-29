@@ -82,6 +82,7 @@ CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
 KEY_FILE="${BOSUN_CONFIG_DIR}/server.key"
 WEBHOOK_SECRET_FILE="${BOSUN_CONFIG_DIR}/webhook-secret"
 JWT_SECRET_FILE="${BOSUN_CONFIG_DIR}/jwt-secret"
+MCP_API_KEY_FILE="${BOSUN_CONFIG_DIR}/mcp-api-key"
 BUILD_DIR="$(mktemp -d /tmp/bosun-build.XXXXXX)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
@@ -639,6 +640,18 @@ else
     ADMIN_PASSWORD_GENERATED="false"
 fi
 
+# Generate MCP API key for LLM agent authentication
+header "Step 12b/16: Generating MCP API key"
+if [ -f "$MCP_API_KEY_FILE" ]; then
+    info "MCP API key already exists at $MCP_API_KEY_FILE"
+else
+    info "Generating random MCP API key..."
+    openssl rand -hex 32 > "$MCP_API_KEY_FILE"
+    chmod 0600 "$MCP_API_KEY_FILE"
+    chown "${BOSUN_USER}:${BOSUN_USER}" "$MCP_API_KEY_FILE" 2>/dev/null || true
+    info "MCP API key generated and saved to $MCP_API_KEY_FILE"
+fi
+
 # ── Step 13: Create systemd service ────────────────────────────────────────────
 header "Step 13/16: Creating systemd service"
 
@@ -685,7 +698,9 @@ ExecStart=${BOSUN_BIN_DIR}/bosun-daemon \\
     --key ${KEY_FILE} \\
     --jwt-secret \$(cat ${JWT_SECRET_FILE}) \\
     --webhook-listen ${BOSUN_WEBHOOK_LISTEN} \\
-    --webhook-secret \$(cat ${WEBHOOK_SECRET_FILE})
+    --webhook-secret \\$(cat ${WEBHOOK_SECRET_FILE}) \\
+    --mcp-listen 127.0.0.1:9092 \\
+    --mcp-api-key \\$(cat ${MCP_API_KEY_FILE})
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=${BOSUN_RUST_LOG}
