@@ -3,7 +3,7 @@
 > 🌐 **English version:** [README.en.md](./README.en.md) — [View this README in English](./README.en.md)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/bosun-⚓_Minimal_PaaS-3BB1DC?style=for-the-badge&logo=docker&logoColor=white&labelColor=2B2B2B&fontSize=24" alt="Bosun Logo" width="480">
+  <img src="https://raw.githubusercontent.com/rquezada-tech/bosun/main/logo_bosun.png" alt="Bosun Logo" width="340">
 </p>
 
 > *Deploy Docker apps, monitor metrics, and manage SSL — all from your terminal. Zero dashboard. Pure CLI.*
