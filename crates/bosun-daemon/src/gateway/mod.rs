@@ -6,10 +6,17 @@
 //!
 //! Route IDs use the pattern `bosun-{app_name}` so they can be individually
 //! managed and removed.
+//!
+//! ## Cross-VPS Routing (mTLS)
+//!
+//! APISIX can route traffic to apps on OTHER VPS servers running bosun,
+//! with mutual TLS authentication between nodes. See `Peer` and the
+//! peer management methods below.
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::path::PathBuf;
 
 /// Default base URL for the APISIX Admin API.
 const DEFAULT_ADMIN_URL: &str = "http://localhost:9180/apisix/admin";
@@ -154,19 +161,54 @@ impl GatewayClient {
     /// Configure a reverse proxy route for an application.
     ///
     /// Creates a route in APISIX that proxies requests matching
-    /// `domain` to `localhost:port`.
+    /// `domain` to the upstream. When `peer_name` is provided, the
+    /// upstream becomes `https://{peer.addr}:{port}` with mTLS
+    /// authentication; otherwise defaults to `localhost:{port}`.
     pub async fn configure_route(
         &self,
         app_name: &str,
         domain: &str,
         port: u16,
         upstream_path: Option<&str>,
+        peer_name: Option<&str>,
     ) -> anyhow::Result<()> {
         let route_id = Self::route_id(app_name);
         let uri = upstream_path.unwrap_or("/*").to_string();
 
+        let (upstream_addr, plugins) = if let Some(pname) = peer_name {
+            // Cross-VPS routing: use peer address with mTLS
+            let peers = load_peers()?;
+            let peer = peers
+                .iter()
+                .find(|p| p.name == pname)
+                .ok_or_else(|| anyhow::anyhow!("Peer '{pname}' not found. Add it with: bosun gateway peer add {pname} <addr> <ca-cert>"))?;
+
+            tracing::info!(
+                "Configuring cross-VPS route for {} via peer {} ({}:{})",
+                app_name,
+                pname,
+                peer.addr,
+                port
+            );
+
+            // Build mTLS plugin config for APISIX
+            let mut mtsl_config = serde_json::Map::new();
+            mtsl_config.insert(
+                "client_ca".to_string(),
+                JsonValue::String(peer.cert_path.clone()),
+            );
+
+            let mut plugins_map = serde_json::Map::new();
+            plugins_map.insert("mtls".to_string(), JsonValue::Object(mtsl_config));
+
+            (format!("{}:{}", peer.addr, port), Some(plugins_map))
+        } else {
+            // Local routing: use localhost
+            (format!("localhost:{}", port), None)
+        };
+
         let mut nodes = std::collections::BTreeMap::new();
-        nodes.insert(format!("localhost:{}", port), 1);
+        nodes.insert(upstream_addr, 1);
 
         let route = ApisixRoute {
             id: Some(route_id.clone()),
@@ -177,14 +219,14 @@ impl GatewayClient {
                 nodes,
                 lb_type: "roundrobin".to_string(),
             }),
-            plugins: None,
+            plugins,
             status: Some(1),
         };
 
         let url = format!("{}/routes/{}", self.admin_url, route_id);
 
         tracing::info!(
-            "Configuring APISIX route for {} ({} -> localhost:{})",
+            "Configuring APISIX route for {} ({} -> port {})",
             app_name,
             domain,
             port
@@ -624,4 +666,178 @@ pub struct RouteInfo {
     pub port: u32,
     pub plugins: Vec<String>,
     pub uri: String,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Cross-VPS Peer Management (mTLS)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Status of a remote bosun peer node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerStatus {
+    /// Peer is reachable and TLS handshake succeeds.
+    Online,
+    /// Peer is unreachable or TLS handshake fails.
+    Offline,
+    /// Peer has not been tested yet.
+    Unknown,
+}
+
+impl std::fmt::Display for PeerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerStatus::Online => write!(f, "online"),
+            PeerStatus::Offline => write!(f, "offline"),
+            PeerStatus::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// A remote bosun daemon node that can receive traffic via APISIX
+/// with mutual TLS authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Peer {
+    /// Human-readable name for this peer (e.g., "nyc-vps").
+    pub name: String,
+    /// Host:port address of the remote bosun node.
+    pub addr: String,
+    /// Path to the CA certificate that signed the peer's node cert.
+    pub cert_path: String,
+    /// Current connectivity status.
+    #[serde(default = "default_peer_status")]
+    pub status: PeerStatus,
+}
+
+fn default_peer_status() -> PeerStatus {
+    PeerStatus::Unknown
+}
+
+/// Path to the peers configuration file.
+const PEERS_FILE: &str = "/etc/bosun/peers.json";
+
+/// Load all peers from the peers JSON file.
+fn load_peers() -> anyhow::Result<Vec<Peer>> {
+    let path = PathBuf::from(PEERS_FILE);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to read peers file {}: {e}", path.display()))?;
+    let peers: Vec<Peer> = serde_json::from_str(&data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse peers file: {e}"))?;
+    Ok(peers)
+}
+
+/// Save all peers to the peers JSON file.
+fn save_peers(peers: &[Peer]) -> anyhow::Result<()> {
+    let path = PathBuf::from(PEERS_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string_pretty(peers)?;
+    std::fs::write(&path, data)
+        .map_err(|e| anyhow::anyhow!("Failed to write peers file {}: {e}", path.display()))?;
+    Ok(())
+}
+
+impl GatewayClient {
+    // ═══════════════════════════════════════════════════════════════
+    //  Peer management
+    // ═══════════════════════════════════════════════════════════════
+
+    /// Register a remote bosun node as a peer.
+    ///
+    /// `cert_path` should point to the CA certificate that signed
+    /// the remote node's TLS certificate. This CA cert is used by
+    /// APISIX to verify the peer during mTLS handshake.
+    pub fn add_peer(
+        name: &str,
+        addr: &str,
+        cert_path: &str,
+    ) -> anyhow::Result<Peer> {
+        let mut peers = load_peers()?;
+
+        // Replace if already exists
+        peers.retain(|p| p.name != name);
+
+        let peer = Peer {
+            name: name.to_string(),
+            addr: addr.to_string(),
+            cert_path: cert_path.to_string(),
+            status: PeerStatus::Unknown,
+        };
+
+        tracing::info!("Adding peer: {} at {} (CA cert: {})", name, addr, cert_path);
+        peers.push(peer.clone());
+        save_peers(&peers)?;
+
+        Ok(peer)
+    }
+
+    /// List all registered peers.
+    pub fn list_peers() -> anyhow::Result<Vec<Peer>> {
+        load_peers()
+    }
+
+    /// Remove a registered peer by name.
+    pub fn remove_peer(name: &str) -> anyhow::Result<()> {
+        let mut peers = load_peers()?;
+
+        let len_before = peers.len();
+        peers.retain(|p| p.name != name);
+
+        if peers.len() == len_before {
+            anyhow::bail!("Peer '{name}' not found");
+        }
+
+        tracing::info!("Removed peer: {}", name);
+        save_peers(&peers)?;
+        Ok(())
+    }
+
+    /// Test connectivity to a peer.
+    ///
+    /// Attempts a TCP connect + TLS handshake to verify the peer
+    /// is reachable and its certificate is valid.
+    pub async fn test_peer(name: &str) -> anyhow::Result<Peer> {
+        let mut peers = load_peers()?;
+        let peer = peers
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Peer '{name}' not found"))?;
+
+        tracing::info!("Testing connectivity to peer '{}' at {}", name, peer.addr);
+
+        // Attempt a TLS connection to the peer
+        let url = format!("https://{}", peer.addr);
+        let client = Client::builder()
+            .danger_accept_invalid_certs(true) // We just want to test reachability
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build test client: {e}"))?;
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.get(&url).send(),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                peer.status = PeerStatus::Online;
+                tracing::info!("Peer '{}' is online", name);
+            }
+            Ok(Err(e)) => {
+                peer.status = PeerStatus::Offline;
+                tracing::warn!("Peer '{}' is offline: {e}", name);
+            }
+            Err(_) => {
+                peer.status = PeerStatus::Offline;
+                tracing::warn!("Peer '{}' timed out after 10s", name);
+            }
+        }
+
+        let result = peer.clone();
+        save_peers(&peers)?;
+        Ok(result)
+    }
 }

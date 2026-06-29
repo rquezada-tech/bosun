@@ -43,7 +43,40 @@ BOSUN_RUST_LOG="${BOSUN_RUST_LOG:-bosun_daemon=info}"
 WITH_GATEWAY="${WITH_GATEWAY:-false}"  # Set to true to install APISIX API Gateway
 WITH_CROWDSEC="${WITH_CROWDSEC:-false}"  # Set to true to install CrowdSec IDS/IPS
 WITH_SWARM="${WITH_SWARM:-false}"  # Set to true to initialize Docker Swarm during install
+AS_CONTROLLER="false"  # Set via --as-controller flag to configure as multi-cloud controller
 # If WITH_CROWDSEC is not set, install fail2ban as lightweight fallback
+
+# ── Parse command-line flags ───────────────────────────────────────────────────
+for arg in "$@"; do
+    case "$arg" in
+        --as-controller)
+            AS_CONTROLLER="true"
+            info "Controller mode requested: will configure as multi-cloud orchestration controller"
+            ;;
+        --with-swarm)
+            WITH_SWARM="true"
+            ;;
+        --with-gateway)
+            WITH_GATEWAY="true"
+            ;;
+        --with-crowdsec)
+            WITH_CROWDSEC="true"
+            ;;
+        --help|-h)
+            echo "Usage: sudo bash install.sh [options]"
+            echo ""
+            echo "Options:"
+            echo "  --as-controller   Configure as a multi-cloud orchestration controller"
+            echo "  --with-swarm      Initialize Docker Swarm"
+            echo "  --with-gateway    Install APISIX API Gateway"
+            echo "  --with-crowdsec   Install CrowdSec IDS/IPS (default: fail2ban)"
+            echo ""
+            echo "Environment variables:"
+            echo "  BOSUN_VERSION, BOSUN_REPO, BOSUN_USER, BOSUN_LISTEN_ADDR, ..."
+            exit 0
+            ;;
+    esac
+done
 
 CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
 KEY_FILE="${BOSUN_CONFIG_DIR}/server.key"
@@ -421,8 +454,159 @@ if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
     warn "  $KEY_FILE"
 fi
 
-# ── Step 10: Generate webhook secret ────────────────────────────────────────────
-header "Step 10/14: Generating webhook secret"
+# ── Generate controller-specific mTLS certs ──────────────────────────────
+if [ "$AS_CONTROLLER" = "true" ]; then
+    header "Controller mode: Generating mTLS certificates for inter-node communication"
+
+    CONTROLLER_CA_KEY="${BOSUN_CONFIG_DIR}/controller-ca.key"
+    CONTROLLER_CA_CERT="${BOSUN_CONFIG_DIR}/controller-ca.crt"
+    CONTROLLER_CLIENT_CERT="${BOSUN_CONFIG_DIR}/controller-client.crt"
+    CONTROLLER_CLIENT_KEY="${BOSUN_CONFIG_DIR}/controller-client.key"
+
+    if [ -f "$CONTROLLER_CA_KEY" ] && [ -f "$CONTROLLER_CA_CERT" ]; then
+        info "Controller CA certificates already exist."
+    else
+        info "Generating controller CA (Certificate Authority)..."
+        # Generate a CA key and self-signed certificate for mTLS between controller and worker nodes
+        openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+            -keyout "$CONTROLLER_CA_KEY" \
+            -out "$CONTROLLER_CA_CERT" \
+            -subj "/CN=Bosun Controller CA/O=Bosun PaaS/C=US" 2>/dev/null
+
+        chmod 0600 "$CONTROLLER_CA_KEY"
+        chmod 0644 "$CONTROLLER_CA_CERT"
+        info "Controller CA generated: $CONTROLLER_CA_CERT"
+    fi
+
+    # Generate a client certificate signed by the CA for inter-node gRPC
+    if [ -f "$CONTROLLER_CLIENT_KEY" ] && [ -f "$CONTROLLER_CLIENT_CERT" ]; then
+        info "Controller client certificates already exist."
+    else
+        info "Generating controller client certificate (signed by CA)..."
+        # Generate client key
+        openssl genrsa -out "$CONTROLLER_CLIENT_KEY" 4096 2>/dev/null
+
+        # Generate CSR
+        openssl req -new -key "$CONTROLLER_CLIENT_KEY" \
+            -out /tmp/bosun-controller-client.csr \
+            -subj "/CN=bosun-controller/O=Bosun PaaS/C=US" 2>/dev/null
+
+        # Sign with CA (including SANs for localhost and typical VPS hostnames)
+        cat > /tmp/bosun-controller-ext.cnf << 'EOF'
+[v3_req]
+subjectAltName = DNS:localhost,DNS:controller,DNS:$(hostname -f 2>/dev/null || hostname),IP:127.0.0.1
+keyUsage = digitalSignature,keyEncipherment
+extendedKeyUsage = clientAuth,serverAuth
+EOF
+
+        openssl x509 -req -days 3650 \
+            -in /tmp/bosun-controller-client.csr \
+            -CA "$CONTROLLER_CA_CERT" \
+            -CAkey "$CONTROLLER_CA_KEY" \
+            -CAcreateserial \
+            -out "$CONTROLLER_CLIENT_CERT" \
+            -extensions v3_req \
+            -extfile /tmp/bosun-controller-ext.cnf 2>/dev/null
+
+        chmod 0600 "$CONTROLLER_CLIENT_KEY"
+        chmod 0644 "$CONTROLLER_CLIENT_CERT"
+        rm -f /tmp/bosun-controller-client.csr /tmp/bosun-controller-ext.cnf /tmp/bosun-controller.srl
+        info "Controller client certificate generated: $CONTROLLER_CLIENT_CERT"
+    fi
+
+    warn "Controller mTLS certificates:"
+    warn "  CA Cert:    $CONTROLLER_CA_CERT"
+    warn "  CA Key:     $CONTROLLER_CA_KEY"
+    warn "  Client Cert: $CONTROLLER_CLIENT_CERT"
+    warn "  Client Key:  $CONTROLLER_CLIENT_KEY"
+    warn ""
+    warn "Share the CA cert ($CONTROLLER_CA_CERT) with worker nodes."
+    warn "Worker nodes need their own client certs signed by this CA."
+fi
+
+# ── Step 10: Generate mTLS certificates for cross-VPS routing ─────────────
+header "Step 10/16: Generating mTLS certificates for cross-VPS routing"
+
+CA_KEY="${BOSUN_CONFIG_DIR}/ca.key"
+CA_CRT="${BOSUN_CONFIG_DIR}/ca.crt"
+NODE_KEY="${BOSUN_CONFIG_DIR}/node.key"
+NODE_CSR="${BOSUN_CONFIG_DIR}/node.csr"
+NODE_CRT="${BOSUN_CONFIG_DIR}/node.crt"
+
+# Only generate if gateway is enabled and certs don't exist
+if [ "$WITH_GATEWAY" = "true" ]; then
+    if [ -f "$CA_CRT" ] && [ -f "$NODE_CRT" ]; then
+        info "mTLS certificates already present."
+        info "  CA cert: $CA_CRT"
+        info "  Node cert: $NODE_CRT"
+    else
+        info "Generating CA and node certificates for mTLS..."
+
+        # Generate CA private key and self-signed CA certificate
+        openssl genrsa -out "$CA_KEY" 4096 2>/dev/null
+        chmod 0600 "$CA_KEY"
+
+        openssl req -x509 -new -nodes \
+            -key "$CA_KEY" \
+            -sha256 -days 3650 \
+            -out "$CA_CRT" \
+            -subj "/CN=Bosun CA/O=Bosun PaaS/C=US" 2>/dev/null
+        chmod 0644 "$CA_CRT"
+
+        info "CA certificate generated: $CA_CRT"
+
+        # Generate node private key and CSR
+        openssl genrsa -out "$NODE_KEY" 2048 2>/dev/null
+        chmod 0600 "$NODE_KEY"
+
+        SERVER_NAME="${SERVER_NAME:-$(hostname -f 2>/dev/null || hostname)}"
+        openssl req -new \
+            -key "$NODE_KEY" \
+            -out "$NODE_CSR" \
+            -subj "/CN=${SERVER_NAME}/O=Bosun Node/C=US" 2>/dev/null
+
+        # Sign the node CSR with the CA
+        openssl x509 -req \
+            -in "$NODE_CSR" \
+            -CA "$CA_CRT" \
+            -CAkey "$CA_KEY" \
+            -CAcreateserial \
+            -out "$NODE_CRT" \
+            -days 365 -sha256 2>/dev/null
+        chmod 0644 "$NODE_CRT"
+
+        # Clean up CSR
+        rm -f "$NODE_CSR"
+
+        chown "${BOSUN_USER}:${BOSUN_USER}" "$CA_KEY" "$CA_CRT" "$NODE_KEY" "$NODE_CRT" 2>/dev/null || true
+
+        info "Node certificate generated: $NODE_CRT"
+        info ""
+
+        echo -e "  ${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "  ${YELLOW}║  mTLS certificates generated for cross-VPS routing           ║${NC}"
+        echo -e "  ${YELLOW}║                                                              ║${NC}"
+        echo -e "  ${YELLOW}║  To add a peer node on another VPS:                          ║${NC}"
+        echo -e "  ${YELLOW}║  1. Copy the CA cert to the peer:                            ║${NC}"
+        echo -e "  ${YELLOW}║     scp $CA_CRT user@peer:/etc/bosun/ca.crt                  ║${NC}"
+        echo -e "  ${YELLOW}║                                                              ║${NC}"
+        echo -e "  ${YELLOW}║  2. On the peer, generate its own node cert (same CA):       ║${NC}"
+        echo -e "  ${YELLOW}║     (re-run this script with WITH_GATEWAY=true)              ║${NC}"
+        echo -e "  ${YELLOW}║                                                              ║${NC}"
+        echo -e "  ${YELLOW}║  3. Add the peer to this node's gateway:                     ║${NC}"
+        echo -e "  ${YELLOW}║     bosun gateway peer add <name> <peer_addr> $CA_CRT        ║${NC}"
+        echo -e "  ${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+    fi
+else
+    info "APISIX gateway not enabled (WITH_GATEWAY=false). Skipping mTLS certs."
+    info "  To enable cross-VPS routing later:"
+    info "    1. Re-run install with WITH_GATEWAY=true"
+    info "    2. Or generate certs manually with openssl"
+fi
+
+# ── Step 11: Generate webhook secret ────────────────────────────────────────────
+header "Step 11/16: Generating webhook secret"
 
 if [ -f "$WEBHOOK_SECRET_FILE" ]; then
     info "Webhook secret already exists at $WEBHOOK_SECRET_FILE"
@@ -434,8 +618,8 @@ else
     info "Webhook secret generated and saved to $WEBHOOK_SECRET_FILE"
 fi
 
-# ── Step 11: Generate JWT secret and admin password ──────────────────────────
-header "Step 11/14: Generating JWT authentication secret"
+# ── Step 12: Generate JWT secret and admin password ──────────────────────────
+header "Step 12/16: Generating JWT authentication secret"
 
 if [ -f "$JWT_SECRET_FILE" ]; then
     info "JWT secret already exists at $JWT_SECRET_FILE"
@@ -455,8 +639,8 @@ else
     ADMIN_PASSWORD_GENERATED="false"
 fi
 
-# ── Step 12: Create systemd service ────────────────────────────────────────────
-header "Step 12/14: Creating systemd service"
+# ── Step 13: Create systemd service ────────────────────────────────────────────
+header "Step 13/16: Creating systemd service"
 
 # Create bosun system user if it doesn't exist
 if ! id -u "$BOSUN_USER" &>/dev/null; then
@@ -528,8 +712,8 @@ chmod 0644 "$SERVICE_FILE"
 # Reload systemd
 systemctl daemon-reload
 
-# ── Step 13: Enable and start the service ──────────────────────────────────────
-header "Step 13/14: Enabling and starting bosun-daemon"
+# ── Step 14: Enable and start the service ──────────────────────────────────────
+header "Step 14/16: Enabling and starting bosun-daemon"
 
 systemctl enable bosun-daemon.service
 
@@ -551,8 +735,8 @@ else
     warn "Check logs: journalctl -u bosun-daemon -f"
 fi
 
-# ── Step 14: Install IDS/IPS (CrowdSec or Fail2Ban) ──────────────────────────
-header "Step 14/15: Installing IDS/IPS security engine"
+# ── Step 15: Install IDS/IPS (CrowdSec or Fail2Ban) ──────────────────────────
+header "Step 15/16: Installing IDS/IPS security engine"
 
 if [ "$WITH_CROWDSEC" = "true" ]; then
     info "CrowdSec requested via --with-crowdsec"
@@ -640,8 +824,8 @@ fi
 
 info "Security engine ready — bosun-daemon will auto-detect and configure per-app."
 
-# ── Step 15: Open firewall port ───────────────────────────────────────────────
-header "Step 15/15: Configuring firewall"
+# ── Step 16: Open firewall port ───────────────────────────────────────────────
+header "Step 16/16: Configuring firewall"
 
 BOSUN_PORT="${BOSUN_LISTEN_ADDR##*:}"
 WEBHOOK_PORT="${BOSUN_WEBHOOK_LISTEN##*:}"
@@ -728,9 +912,9 @@ echo \"\"
 if [ \"$WITH_SWARM\" = \"true\" ]; then
     echo -e \"  6. ${CYAN}Docker Swarm Cluster Management:${NC}\"
     echo -e \"     ${CYAN}List nodes:${NC}     bosun cluster nodes\"
-    echo -e \"     ${CYAN}Join worker:${NC}    bosun cluster join <TOKEN> <MANAGER_IP>:2377\"
+    echo -e "     ${CYAN}Join worker:${NC}    bosun cluster join \${TOKEN} \${MANAGER_IP}:2377"
     echo -e \"     ${CYAN}Leave Swarm:${NC}    bosun cluster leave\"
-    echo -e \"     ${CYAN}Manage nodes:${NC}   docker node ls  (Docker's native CLI)\"
+    echo -e "     ${CYAN}Manage nodes:${NC}   docker node ls  (Docker native CLI)"
     echo \"\"
 fi
 echo -e "     Available strategies via X-Bosun-Strategy header:"
@@ -740,4 +924,38 @@ echo -e "       blue-green  — maintain two environments, switch traffic"
 echo ""
 echo -e "  ${YELLOW}Note:${NC} A self-signed TLS certificate was generated for gRPC mTLS."
 echo -e "  ${YELLOW}Edge SSL (HTTPS for deployed apps) is handled by Caddy via Let's Encrypt.${NC}"
+
+# ── Controller mode next steps ──────────────────────────────────────────
+if [ "$AS_CONTROLLER" = "true" ]; then
+    echo ""
+    echo -e "  ${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${CYAN}║  CONTROLLER MODE — Multi-Cloud Orchestration                 ║${NC}"
+    echo -e "  ${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${CYAN}This node is configured as a multi-cloud controller.${NC}"
+    echo -e "  ${CYAN}You can now manage multiple bosun-daemon nodes across VPS/clouds.${NC}"
+    echo ""
+    echo -e "  ${CYAN}1. Install bosun-daemon on each worker VPS:${NC}"
+    echo -e "     curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash"
+    echo ""
+    echo -e "  ${CYAN}2. On the controller, register each worker node:${NC}"
+    echo -e "     bosun cluster add-node --name vps-2 --addr https://<WORKER_IP>:9090 --label cloud=aws --label region=us-east-1"
+    echo -e "     bosun cluster add-node --name vps-3 --addr https://<WORKER_IP>:9090 --label cloud=digitalocean --label region=nyc3"
+    echo ""
+    echo -e "  ${CYAN}3. View your cluster:${NC}"
+    echo -e "     bosun cluster nodes        # List all nodes (Swarm + Bosun managed)"
+    echo -e "     bosun cluster metrics      # Aggregated cluster metrics"
+    echo ""
+    echo -e "  ${CYAN}4. Deploy to a specific node:${NC}"
+    echo -e "     bosun deploy ./my-app --node vps-2 --domain myapp.example.com"
+    echo ""
+    echo -e "  ${CYAN}5. Share controller CA with worker nodes for mTLS:${NC}"
+    echo -e "     scp ${BOSUN_CONFIG_DIR}/controller-ca.crt user@worker:/etc/bosun/"
+    echo ""
+    echo -e "  ${CYAN}Controller certs:${NC}"
+    echo -e "    CA:      ${BOSUN_CONFIG_DIR}/controller-ca.crt"
+    echo -e "    Client:  ${BOSUN_CONFIG_DIR}/controller-client.crt"
+    echo ""
+fi
+
 echo ""

@@ -66,9 +66,9 @@ impl Cli {
 
         match &self.command {
             Command::Apps { sub } => self.run_apps(&mut client, sub).await,
-            Command::Deploy { path, domain, ssl, strategy, pre_hooks, post_hooks } => {
+            Command::Deploy { path, domain, ssl, strategy, pre_hooks, post_hooks, node } => {
                 let deploy_strategy: DeployStrategy = strategy.clone().into();
-                self.run_deploy(&mut client, path, domain.as_deref(), *ssl, &deploy_strategy, pre_hooks, post_hooks).await
+                self.run_deploy(&mut client, path, domain.as_deref(), *ssl, &deploy_strategy, pre_hooks, post_hooks, node.as_deref()).await
             }
             Command::Metrics { app, live } => {
                 self.run_metrics(&mut client, app.as_deref(), *live).await
@@ -84,10 +84,11 @@ impl Cli {
             Command::Logout => self.run_logout().await,
             Command::Whoami => self.run_whoami().await,
             Command::Backup { sub } => self.run_backup(&mut client, sub).await,
-            Command::Gateway { .. } | Command::Security { .. } => {
+            Command::Gateway { sub } => self.run_gateway(&mut client, sub).await,
+            Command::Security { .. } => {
                 anyhow::bail!("Command not yet available in this build")
             }
-            Command::Cluster { sub } => self.run_cluster(sub).await,
+            Command::Cluster { sub } => self.run_cluster(&mut client, sub).await,
             Command::Dashboard => {
                 use crate::dashboard::Dashboard;
                 let mut dashboard = Dashboard::new(client);
@@ -413,6 +414,7 @@ impl Cli {
         strategy: &DeployStrategy,
         pre_hooks: &[String],
         post_hooks: &[String],
+        node: Option<&str>,
     ) -> anyhow::Result<()> {
         let strategy_label = strategy_label(strategy);
 
@@ -474,21 +476,56 @@ impl Cli {
         }
 
         if !self.json {
-            eprintln!("🚀 Deploying {path} (strategy: {strategy_label})...");
+            if let Some(node_name) = node {
+                eprintln!("🚀 Deploying {path} to node '{node_name}' (strategy: {strategy_label})...");
+            } else {
+                eprintln!("🚀 Deploying {path} (strategy: {strategy_label})...");
+            }
         }
 
-        let response = client
-            .deploy(
-                path,
-                domain,
-                ssl,
-                std::collections::HashMap::new(),
-                None,
-                *strategy,
-                &all_pre_hooks,
-                &all_post_hooks,
-            )
-            .await?;
+        let response = if let Some(node_name) = node {
+            // Deploy to a specific managed node via cluster controller
+            let deploy_req = crate::proto::bosun::v1::DeployRequest {
+                context_path: path.to_string(),
+                domain: domain.map(|d| d.to_string()),
+                enable_ssl: ssl,
+                env: std::collections::HashMap::new(),
+                port: None,
+                strategy: (*strategy).into(),
+                pre_hooks: all_pre_hooks.clone(),
+                post_hooks: all_post_hooks.clone(),
+            };
+            let node_response = client.deploy_to_node(node_name, deploy_req).await?;
+
+            if self.json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "app_name": node_response.node_name,
+                    "status": node_response.status,
+                    "message": node_response.message,
+                    "strategy": strategy_label,
+                    "node": node_name,
+                }))?);
+            } else {
+                println!(
+                    "✔ Deploy delegated to node '{}': {} (status: {})",
+                    node_name, node_response.message, node_response.status
+                );
+            }
+            return Ok(());
+        } else {
+            client
+                .deploy(
+                    path,
+                    domain,
+                    ssl,
+                    std::collections::HashMap::new(),
+                    None,
+                    *strategy,
+                    &all_pre_hooks,
+                    &all_post_hooks,
+                )
+                .await?
+        };
 
         if self.json {
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({
@@ -1006,6 +1043,7 @@ impl Cli {
             } => self.gateway_plugin(client, app, plugin, config.as_deref()).await,
             GatewayCmd::Cache { sub } => self.gateway_cache(client, sub).await,
             GatewayCmd::Metrics => self.gateway_metrics(client).await,
+            GatewayCmd::Peer { sub } => self.gateway_peer(client, sub).await,
         }
     }
 
@@ -1283,6 +1321,159 @@ impl Cli {
         }
 
         println!("\n  (Run `bosun gateway metrics --json` for full Prometheus output)");
+        Ok(())
+    }
+
+    // ── Gateway Peers (cross-VPS mTLS) ─────────────────────────────
+
+    async fn gateway_peer(
+        &self,
+        client: &mut BosunClient,
+        sub: &PeerCmd,
+    ) -> anyhow::Result<()> {
+        match sub {
+            PeerCmd::Add { name, addr, ca_cert } => {
+                self.gateway_peer_add(client, name, addr, ca_cert).await
+            }
+            PeerCmd::List => self.gateway_peer_list(client).await,
+            PeerCmd::Remove { name } => self.gateway_peer_remove(client, name).await,
+            PeerCmd::Test { name } => self.gateway_peer_test(client, name).await,
+        }
+    }
+
+    async fn gateway_peer_add(
+        &self,
+        client: &mut BosunClient,
+        name: &str,
+        addr: &str,
+        ca_cert: &str,
+    ) -> anyhow::Result<()> {
+        let response = client.add_peer(name, addr, ca_cert).await?;
+
+        if self.json {
+            let peer = response.peer.unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": peer.name,
+                    "addr": peer.addr,
+                    "cert_path": peer.cert_path,
+                    "status": peer.status,
+                }))?
+            );
+        } else {
+            println!("Peer '{name}' added (addr: {addr})");
+            println!("  CA certificate: {ca_cert}");
+            println!("  Run 'bosun gateway peer test {name}' to verify connectivity.");
+        }
+        Ok(())
+    }
+
+    async fn gateway_peer_list(
+        &self,
+        client: &mut BosunClient,
+    ) -> anyhow::Result<()> {
+        let response = client.list_peers().await?;
+
+        if self.json {
+            let peers: Vec<serde_json::Value> = response
+                .peers
+                .iter()
+                .map(|p| serde_json::json!({
+                    "name": p.name,
+                    "addr": p.addr,
+                    "cert_path": p.cert_path,
+                    "status": p.status,
+                }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "peers": peers }))?);
+            return Ok(());
+        }
+
+        if response.peers.is_empty() {
+            println!("No gateway peers configured.");
+            println!("Add one with: bosun gateway peer add <name> <addr> --ca-cert <path>");
+            return Ok(());
+        }
+
+        use tabled::{Table, Tabled};
+        #[derive(Tabled)]
+        struct PeerRow {
+            #[tabled(rename = "NAME")]
+            name: String,
+            #[tabled(rename = "ADDRESS")]
+            addr: String,
+            #[tabled(rename = "CA CERT")]
+            cert_path: String,
+            #[tabled(rename = "STATUS")]
+            status: String,
+        }
+
+        let rows: Vec<PeerRow> = response
+            .peers
+            .iter()
+            .map(|p| PeerRow {
+                name: p.name.clone(),
+                addr: p.addr.clone(),
+                cert_path: p.cert_path.clone(),
+                status: p.status.clone(),
+            })
+            .collect();
+
+        println!("{}", Table::new(rows));
+        Ok(())
+    }
+
+    async fn gateway_peer_remove(
+        &self,
+        client: &mut BosunClient,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        client.remove_peer(name).await?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "remove_peer",
+                    "name": name,
+                    "status": "ok"
+                }))?
+            );
+        } else {
+            println!("Peer '{name}' removed.");
+        }
+        Ok(())
+    }
+
+    async fn gateway_peer_test(
+        &self,
+        client: &mut BosunClient,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("Testing connectivity to peer '{name}'...");
+        }
+
+        let response = client.test_peer(name).await?;
+        let peer = response.peer.unwrap_or_default();
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": peer.name,
+                    "addr": peer.addr,
+                    "status": peer.status,
+                }))?
+            );
+        } else {
+            match peer.status.as_str() {
+                "online" => println!("[ONLINE]  Peer '{name}' at {}", peer.addr),
+                "offline" => println!("[OFFLINE] Peer '{name}' at {}", peer.addr),
+                _ => println!("[UNKNOWN] Peer '{name}' status: {}", peer.status),
+            }
+        }
         Ok(())
     }
 
@@ -1737,16 +1928,21 @@ footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px s
 
     // ── Cluster ────────────────────────────────────────────────────
 
-    async fn run_cluster(&self, sub: &ClusterCmd) -> anyhow::Result<()> {
+    async fn run_cluster(&self, client: &mut BosunClient, sub: &ClusterCmd) -> anyhow::Result<()> {
         match sub {
             ClusterCmd::Init { advertise_addr } => {
                 self.cluster_init(advertise_addr.as_deref()).await
             }
-            ClusterCmd::Join { token, addr } => {
-                self.cluster_join(token, addr).await
-            }
-            ClusterCmd::Nodes => self.cluster_nodes().await,
+            ClusterCmd::Join { token, addr } => self.cluster_join(token, addr).await,
+            ClusterCmd::Nodes => self.cluster_nodes(client).await,
             ClusterCmd::Leave { force } => self.cluster_leave(*force).await,
+            ClusterCmd::AddNode { name, addr, labels } => {
+                self.cluster_add_node(client, name, addr, labels).await
+            }
+            ClusterCmd::RemoveNode { name } => {
+                self.cluster_remove_node(client, name).await
+            }
+            ClusterCmd::ClusterMetrics => self.cluster_metrics(client).await,
         }
     }
 
@@ -1831,7 +2027,11 @@ footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px s
         Ok(())
     }
 
-    async fn cluster_nodes(&self) -> anyhow::Result<()> {
+    async fn cluster_nodes(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        // Show Docker Swarm nodes
+        if !self.json {
+            eprintln!("🐝 Docker Swarm nodes:");
+        }
         let output = std::process::Command::new("docker")
             .arg("node")
             .arg("ls")
@@ -1842,73 +2042,144 @@ footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px s
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Docker node ls failed:\n{}", stderr.trim());
-        }
+            if !self.json {
+                eprintln!("  (not in Swarm mode or no swarm nodes)");
+            }
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+            if self.json {
+                let nodes: Vec<serde_json::Value> = stdout
+                    .lines()
+                    .map(|line| {
+                        let parts: Vec<&str> = line.split('\t').collect();
+                        serde_json::json!({
+                            "id": parts.get(0).map(|s| s.trim_matches('*').trim()).unwrap_or(""),
+                            "hostname": parts.get(1).map(|s| s.trim()).unwrap_or(""),
+                            "status": parts.get(2).map(|s| s.trim()).unwrap_or(""),
+                            "availability": parts.get(3).map(|s| s.trim()).unwrap_or(""),
+                            "role": if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
+                                "manager"
+                            } else {
+                                "worker"
+                            },
+                        })
+                    })
+                    .collect();
 
-        if self.json {
-            let nodes: Vec<serde_json::Value> = stdout
-                .lines()
-                .map(|line| {
-                    let parts: Vec<&str> = line.split('\t').collect();
-                    serde_json::json!({
-                        "id": parts.get(0).map(|s| s.trim_matches('*').trim()).unwrap_or(""),
-                        "hostname": parts.get(1).map(|s| s.trim()).unwrap_or(""),
-                        "status": parts.get(2).map(|s| s.trim()).unwrap_or(""),
-                        "availability": parts.get(3).map(|s| s.trim()).unwrap_or(""),
-                        "role": if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "swarm_nodes": nodes,
+                }))?);
+            } else {
+                use tabled::{Table, Tabled};
+                #[derive(Tabled)]
+                struct NodeRow {
+                    #[tabled(rename = "ID")]
+                    id: String,
+                    #[tabled(rename = "HOSTNAME")]
+                    hostname: String,
+                    #[tabled(rename = "STATUS")]
+                    status: String,
+                    #[tabled(rename = "AVAILABILITY")]
+                    availability: String,
+                    #[tabled(rename = "ROLE")]
+                    role: String,
+                }
+
+                let rows: Vec<NodeRow> = stdout
+                    .lines()
+                    .map(|line| {
+                        let parts: Vec<&str> = line.split('\t').collect();
+                        let role = if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
                             "manager"
                         } else {
                             "worker"
-                        },
+                        };
+                        NodeRow {
+                            id: parts.get(0).map(|s| s.trim_matches('*').trim().to_string()).unwrap_or_default(),
+                            hostname: parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
+                            status: parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
+                            availability: parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
+                            role: role.to_string(),
+                        }
                     })
-                })
-                .collect();
+                    .collect();
 
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "nodes": nodes,
-            }))?);
-        } else {
-            use tabled::{Table, Tabled};
-            #[derive(Tabled)]
-            struct NodeRow {
-                #[tabled(rename = "ID")]
-                id: String,
-                #[tabled(rename = "HOSTNAME")]
-                hostname: String,
-                #[tabled(rename = "STATUS")]
-                status: String,
-                #[tabled(rename = "AVAILABILITY")]
-                availability: String,
-                #[tabled(rename = "ROLE")]
-                role: String,
+                if rows.is_empty() {
+                    println!("  (no swarm nodes)");
+                } else {
+                    let table = Table::new(rows);
+                    println!("{table}");
+                }
             }
+        }
 
-            let rows: Vec<NodeRow> = stdout
-                .lines()
-                .map(|line| {
-                    let parts: Vec<&str> = line.split('\t').collect();
-                    let role = if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
-                        "manager"
+        // Show Bosun-managed nodes via gRPC
+        if !self.json {
+            eprintln!("\n🔗 Bosun-managed nodes:");
+        }
+
+        match client.list_nodes().await {
+            Ok(resp) => {
+                let nodes = resp.nodes;
+                if self.json {
+                    let json_nodes: Vec<serde_json::Value> = nodes.iter().map(|n| {
+                        serde_json::json!({
+                            "name": n.name,
+                            "addr": n.addr,
+                            "status": n.status,
+                            "labels": n.labels,
+                            "app_count": n.app_count,
+                            "cpu_percent": n.cpu_percent,
+                        })
+                    }).collect();
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "managed_nodes": json_nodes,
+                    }))?);
+                } else {
+                    if nodes.is_empty() {
+                        println!("  No managed nodes. Add one with: bosun cluster add-node --name <name> --addr <addr>");
                     } else {
-                        "worker"
-                    };
-                    NodeRow {
-                        id: parts.get(0).map(|s| s.trim_matches('*').trim().to_string()).unwrap_or_default(),
-                        hostname: parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
-                        status: parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
-                        availability: parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
-                        role: role.to_string(),
-                    }
-                })
-                .collect();
+                        use tabled::{Table, Tabled};
+                        #[derive(Tabled)]
+                        struct ManagedNodeRow {
+                            #[tabled(rename = "NAME")]
+                            name: String,
+                            #[tabled(rename = "ADDR")]
+                            addr: String,
+                            #[tabled(rename = "STATUS")]
+                            status: String,
+                            #[tabled(rename = "APPS")]
+                            apps: String,
+                            #[tabled(rename = "CPU")]
+                            cpu: String,
+                            #[tabled(rename = "LABELS")]
+                            labels: String,
+                        }
 
-            if rows.is_empty() {
-                println!("No nodes found. Is Docker in Swarm mode?");
-            } else {
-                let table = Table::new(rows);
-                println!("{table}");
+                        let rows: Vec<ManagedNodeRow> = nodes.iter().map(|n| {
+                            let label_str: Vec<String> = n.labels.iter()
+                                .map(|(k, v)| format!("{k}={v}"))
+                                .collect();
+                            ManagedNodeRow {
+                                name: n.name.clone(),
+                                addr: n.addr.clone(),
+                                status: n.status.clone(),
+                                apps: n.app_count.to_string(),
+                                cpu: if n.cpu_percent > 0.0 { format!("{:.1}%", n.cpu_percent) } else { "-".to_string() },
+                                labels: label_str.join(", "),
+                            }
+                        }).collect();
+
+                        let table = Table::new(rows);
+                        println!("{table}");
+                    }
+                }
+            }
+            Err(e) => {
+                if !self.json {
+                    eprintln!("  Failed to query managed nodes: {e}");
+                }
             }
         }
 
@@ -1954,6 +2225,138 @@ footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px s
 
         Ok(())
     }
+
+    // ── Bosun-managed cluster (multi-cloud orchestration) ────────────
+
+    async fn cluster_add_node(
+        &self,
+        client: &mut BosunClient,
+        name: &str,
+        addr: &str,
+        labels: &[String],
+    ) -> anyhow::Result<()> {
+        // Parse labels from key=value format
+        let mut label_map = std::collections::HashMap::new();
+        for label in labels {
+            if let Some((k, v)) = label.split_once('=') {
+                label_map.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+
+        if !self.json {
+            eprintln!("🔗 Registering node '{}' at {}...", name, addr);
+        }
+
+        let response = client.add_node(name, addr, label_map).await?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!( {
+                    "action": "add_node",
+                    "name": response.name,
+                    "status": response.status,
+                }))?
+            );
+        } else {
+            println!("✔ Node '{}' registered successfully.", response.name);
+        }
+        Ok(())
+    }
+
+    async fn cluster_remove_node(
+        &self,
+        client: &mut BosunClient,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("🔗 Removing node '{}'...", name);
+        }
+
+        let response = client.remove_node(name).await?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!( {
+                    "action": "remove_node",
+                    "name": response.name,
+                    "status": response.status,
+                }))?
+            );
+        } else {
+            println!("✔ Node '{}' removed.", response.name);
+        }
+        Ok(())
+    }
+
+    async fn cluster_metrics(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("📊 Collecting cluster metrics...");
+        }
+
+        let response = client.cluster_metrics().await?;
+        let nodes = response.nodes;
+
+        if self.json {
+            let json_nodes: Vec<serde_json::Value> = nodes.iter().map(|n| {
+                serde_json::json!({
+                    "name": n.name,
+                    "addr": n.addr,
+                    "status": n.status,
+                    "app_count": n.app_count,
+                    "cpu_percent": n.cpu_percent,
+                    "labels": n.labels,
+                })
+            }).collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "nodes": json_nodes,
+            }))?);
+        } else {
+            if nodes.is_empty() {
+                println!("  No managed nodes to show metrics for.");
+                return Ok(());
+            }
+
+            use tabled::{Table, Tabled};
+            #[derive(Tabled)]
+            struct MetricRow {
+                #[tabled(rename = "NODE")]
+                name: String,
+                #[tabled(rename = "STATUS")]
+                status: String,
+                #[tabled(rename = "APPS")]
+                apps: String,
+                #[tabled(rename = "AVG CPU")]
+                cpu: String,
+                #[tabled(rename = "TOTAL RAM")]
+                ram: String,
+                #[tabled(rename = "LABELS")]
+                labels: String,
+            }
+
+            let rows: Vec<MetricRow> = nodes.iter().map(|n| {
+                let label_str: Vec<String> = n.labels.iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect();
+                let ram = n.labels.get("total_ram_mb")
+                    .map(|r| format!("{} MB", r))
+                    .unwrap_or_else(|| "-".to_string());
+                MetricRow {
+                    name: n.name.clone(),
+                    status: n.status.clone(),
+                    apps: n.app_count.to_string(),
+                    cpu: if n.cpu_percent > 0.0 { format!("{:.1}%", n.cpu_percent) } else { "-".to_string() },
+                    ram,
+                    labels: label_str.join(", "),
+                }
+            }).collect();
+
+            let table = Table::new(rows);
+            println!("{table}");
+        }
+        Ok(())
+    }
 }
 
 // ── Subcommand types ──────────────────────────────────────────────
@@ -1984,6 +2387,9 @@ pub enum Command {
         /// Shell command to run on the host after deploy + health check (can be specified multiple times)
         #[arg(long = "post")]
         post_hooks: Vec<String>,
+        /// Target a specific managed node for deployment (multi-cloud orchestration)
+        #[arg(long)]
+        node: Option<String>,
     },
     /// Show resource metrics for apps
     Metrics {
@@ -2059,7 +2465,7 @@ pub enum ClusterCmd {
         /// Address of the Swarm manager (e.g., 192.168.1.10:2377)
         addr: String,
     },
-    /// List all nodes in the Docker Swarm
+    /// List all nodes in the cluster (Docker Swarm + Bosun managed)
     Nodes,
     /// Leave the Docker Swarm (use --force for managers)
     Leave {
@@ -2067,6 +2473,26 @@ pub enum ClusterCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Register a remote bosun node in the cluster controller
+    AddNode {
+        /// Name for the remote node (e.g., "vps-2", "aws-us-east")
+        #[arg(long)]
+        name: String,
+        /// gRPC address of the remote bosun-daemon (e.g., "https://10.0.0.5:9090")
+        #[arg(long)]
+        addr: String,
+        /// Labels as key=value pairs (e.g., --label cloud=aws --label region=us-east-1)
+        #[arg(long = "label", short = 'l')]
+        labels: Vec<String>,
+    },
+    /// Remove a registered bosun node from the cluster
+    RemoveNode {
+        /// Name of the node to remove
+        #[arg(long)]
+        name: String,
+    },
+    /// Show aggregated cluster metrics from all managed nodes
+    ClusterMetrics,
 }
 
 #[derive(Subcommand)]
@@ -2167,6 +2593,37 @@ pub enum GatewayCmd {
     },
     /// Show Prometheus metrics from APISIX
     Metrics,
+    /// Manage cross-VPS gateway peers (mTLS)
+    Peer {
+        #[command(subcommand)]
+        sub: PeerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PeerCmd {
+    /// Add a remote bosun node as a gateway peer
+    Add {
+        /// Peer name (e.g., "nyc-vps")
+        name: String,
+        /// Host:port of the remote node (e.g., "10.0.1.5:9090")
+        addr: String,
+        /// Path to the CA certificate for mTLS
+        #[arg(long)]
+        ca_cert: String,
+    },
+    /// List all registered gateway peers
+    List,
+    /// Remove a registered gateway peer
+    Remove {
+        /// Peer name to remove
+        name: String,
+    },
+    /// Test connectivity to a peer (TLS handshake)
+    Test {
+        /// Peer name to test
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

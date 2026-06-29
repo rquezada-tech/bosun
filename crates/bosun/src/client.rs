@@ -536,6 +536,75 @@ impl BosunClient {
         Ok(response)
     }
 
+    // ── Cross-VPS Peer Management ──────────────────────────────────
+
+    /// Add a remote bosun node as a gateway peer for cross-VPS routing.
+    pub async fn add_peer(
+        &mut self,
+        name: &str,
+        addr: &str,
+        cert_path: &str,
+    ) -> anyhow::Result<AddPeerResponse> {
+        let request = self.auth_request(tonic::Request::new(AddPeerRequest {
+            name: name.to_string(),
+            addr: addr.to_string(),
+            cert_path: cert_path.to_string(),
+        }));
+        let response = self
+            .inner
+            .add_peer(request)
+            .await
+            .context(format!("gRPC AddPeer failed for '{name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// List all registered gateway peers.
+    pub async fn list_peers(
+        &mut self,
+    ) -> anyhow::Result<ListPeersResponse> {
+        let request = self.auth_request(tonic::Request::new(ListPeersRequest {}));
+        let response = self
+            .inner
+            .list_peers(request)
+            .await
+            .context("gRPC ListPeers failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Remove a registered gateway peer by name.
+    pub async fn remove_peer(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(RemovePeerRequest {
+            name: name.to_string(),
+        }));
+        self.inner
+            .remove_peer(request)
+            .await
+            .context(format!("gRPC RemovePeer failed for '{name}'"))?;
+        Ok(())
+    }
+
+    /// Test connectivity to a gateway peer (TCP + TLS handshake).
+    pub async fn test_peer(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<TestPeerResponse> {
+        let request = self.auth_request(tonic::Request::new(TestPeerRequest {
+            name: name.to_string(),
+        }));
+        let response = self
+            .inner
+            .test_peer(request)
+            .await
+            .context(format!("gRPC TestPeer failed for '{name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
     // ── Security ──────────────────────────────────────────────────
 
     /// Get security engine status.
@@ -562,6 +631,93 @@ impl BosunClient {
             .get_security_decisions(request)
             .await
             .context("gRPC GetSecurityDecisions failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    // ── Cluster (multi-node orchestration) ─────────────────────────
+
+    /// Register a remote bosun node in the cluster controller.
+    pub async fn add_node(
+        &mut self,
+        name: &str,
+        addr: &str,
+        labels: std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<AddNodeResponse> {
+        let request = self.auth_request(tonic::Request::new(AddNodeRequest {
+            name: name.to_string(),
+            addr: addr.to_string(),
+            labels,
+        }));
+        let response = self
+            .inner
+            .add_node(request)
+            .await
+            .context(format!("gRPC AddNode failed for '{name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Remove a managed node from the cluster.
+    pub async fn remove_node(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<RemoveNodeResponse> {
+        let request = self.auth_request(tonic::Request::new(RemoveNodeRequest {
+            name: name.to_string(),
+        }));
+        let response = self
+            .inner
+            .remove_node(request)
+            .await
+            .context(format!("gRPC RemoveNode failed for '{name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// List all registered cluster nodes.
+    pub async fn list_nodes(
+        &mut self,
+    ) -> anyhow::Result<ListNodeResponse> {
+        let request = self.auth_request(tonic::Request::new(ListNodeRequest {}));
+        let response = self
+            .inner
+            .list_node(request)
+            .await
+            .context("gRPC ListNode failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Delegate a deploy to a specific node.
+    pub async fn deploy_to_node(
+        &mut self,
+        node_name: &str,
+        deploy_request: DeployRequest,
+    ) -> anyhow::Result<DeployToNodeResponse> {
+        let request = self.auth_request(tonic::Request::new(DeployToNodeRequest {
+            node_name: node_name.to_string(),
+            deploy: Some(deploy_request),
+        }));
+        let response = self
+            .inner
+            .deploy_to_node(request)
+            .await
+            .context(format!("gRPC DeployToNode failed for '{node_name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Get aggregated cluster metrics from all managed nodes.
+    pub async fn cluster_metrics(
+        &mut self,
+    ) -> anyhow::Result<ClusterMetricsResponse> {
+        let request = self.auth_request(tonic::Request::new(ClusterMetricsRequest {}));
+        let response = self
+            .inner
+            .cluster_metrics(request)
+            .await
+            .context("gRPC ClusterMetrics failed")?
             .into_inner();
         Ok(response)
     }

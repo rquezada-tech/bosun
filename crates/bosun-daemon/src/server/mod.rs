@@ -32,6 +32,8 @@ pub struct BosunService {
     pub backup: Arc<crate::backup::BackupService>,
     /// Security engine (CrowdSec/Fail2Ban) for IDS/IPS monitoring.
     pub security: crate::security::SecurityService,
+    /// Multi-node cluster controller.
+    pub cluster: crate::cluster::ClusterController,
 }
 
 impl BosunService {
@@ -47,6 +49,7 @@ impl BosunService {
         backup: crate::backup::BackupService,
         security: crate::security::SecurityService,
     ) -> Self {
+        let cluster = crate::cluster::ClusterController::new(store.clone());
         Self {
             docker,
             metrics: Arc::new(metrics),
@@ -58,6 +61,7 @@ impl BosunService {
             catalog,
             backup: Arc::new(backup),
             security,
+            cluster,
         }
     }
 }
@@ -899,6 +903,86 @@ impl Bosun for BosunService {
         Ok(Response::new(GetGatewayMetricsResponse { metrics_text }))
     }
 
+    // ── Cross-VPS Peer Management (mTLS) ───────────────────────────
+
+    async fn add_peer(
+        &self,
+        request: Request<AddPeerRequest>,
+    ) -> Result<Response<AddPeerResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("add_peer: name={}, addr={}", req.name, req.addr);
+
+        let peer = crate::gateway::GatewayClient::add_peer(&req.name, &req.addr, &req.cert_path)
+            .map_err(|e| Status::internal(format!("Failed to add peer: {e}")))?;
+
+        Ok(Response::new(AddPeerResponse {
+            peer: Some(PeerInfo {
+                name: peer.name,
+                addr: peer.addr,
+                cert_path: peer.cert_path,
+                status: peer.status.to_string(),
+            }),
+        }))
+    }
+
+    async fn list_peers(
+        &self,
+        _request: Request<ListPeersRequest>,
+    ) -> Result<Response<ListPeersResponse>, Status> {
+        tracing::info!("list_peers called");
+
+        let peers = crate::gateway::GatewayClient::list_peers()
+            .map_err(|e| Status::internal(format!("Failed to list peers: {e}")))?;
+
+        let proto_peers: Vec<PeerInfo> = peers
+            .into_iter()
+            .map(|p| PeerInfo {
+                name: p.name,
+                addr: p.addr,
+                cert_path: p.cert_path,
+                status: p.status.to_string(),
+            })
+            .collect();
+
+        Ok(Response::new(ListPeersResponse {
+            peers: proto_peers,
+        }))
+    }
+
+    async fn remove_peer(
+        &self,
+        request: Request<RemovePeerRequest>,
+    ) -> Result<Response<RemovePeerResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("remove_peer: name={}", req.name);
+
+        crate::gateway::GatewayClient::remove_peer(&req.name)
+            .map_err(|e| Status::internal(format!("Failed to remove peer: {e}")))?;
+
+        Ok(Response::new(RemovePeerResponse {}))
+    }
+
+    async fn test_peer(
+        &self,
+        request: Request<TestPeerRequest>,
+    ) -> Result<Response<TestPeerResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("test_peer: name={}", req.name);
+
+        let peer = crate::gateway::GatewayClient::test_peer(&req.name)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to test peer: {e}")))?;
+
+        Ok(Response::new(TestPeerResponse {
+            peer: Some(PeerInfo {
+                name: peer.name,
+                addr: peer.addr,
+                cert_path: peer.cert_path,
+                status: peer.status.to_string(),
+            }),
+        }))
+    }
+
     // ── Security RPCs ─────────────────────────────────────────────
 
     async fn get_security_status(
@@ -937,5 +1021,90 @@ impl Bosun for BosunService {
                 })
                 .collect(),
         }))
+    }
+
+    // ── Cluster RPCs ─────────────────────────────────────────────
+
+    async fn add_node(
+        &self,
+        request: Request<AddNodeRequest>,
+    ) -> Result<Response<AddNodeResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("add_node called: name={}, addr={}", req.name, req.addr);
+
+        let response = self
+            .cluster
+            .add_node(&req.name, &req.addr, req.labels)
+            .map_err(|e| Status::invalid_argument(format!("Failed to add node: {e}")))?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn remove_node(
+        &self,
+        request: Request<RemoveNodeRequest>,
+    ) -> Result<Response<RemoveNodeResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("remove_node called: name={}", req.name);
+
+        let response = self
+            .cluster
+            .remove_node(&req.name)
+            .map_err(|e| Status::not_found(format!("Failed to remove node: {e}")))?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn list_node(
+        &self,
+        _request: Request<ListNodeRequest>,
+    ) -> Result<Response<ListNodeResponse>, Status> {
+        tracing::info!("list_node called");
+
+        let nodes = self
+            .cluster
+            .list_nodes()
+            .map_err(|e| Status::internal(format!("Failed to list nodes: {e}")))?;
+
+        let node_infos: Vec<NodeInfo> = nodes.iter().map(|n| n.to_proto()).collect();
+
+        Ok(Response::new(ListNodeResponse { nodes: node_infos }))
+    }
+
+    async fn deploy_to_node(
+        &self,
+        request: Request<DeployToNodeRequest>,
+    ) -> Result<Response<DeployToNodeResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("deploy_to_node called: node={}", req.node_name);
+
+        let deploy_req = req
+            .deploy
+            .ok_or_else(|| Status::invalid_argument("deploy request is required"))?;
+
+        let response = self
+            .cluster
+            .deploy_to_node(&req.node_name, &deploy_req)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to deploy to node: {e}")))?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn cluster_metrics(
+        &self,
+        _request: Request<ClusterMetricsRequest>,
+    ) -> Result<Response<ClusterMetricsResponse>, Status> {
+        tracing::info!("cluster_metrics called");
+
+        let docker = self.docker.lock().await;
+        let node_infos = self
+            .cluster
+            .collect_cluster_metrics(&docker, &self.metrics)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to collect cluster metrics: {e}")))?;
+        drop(docker);
+
+        Ok(Response::new(ClusterMetricsResponse { nodes: node_infos }))
     }
 }

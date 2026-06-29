@@ -80,5 +80,10 @@ flate2 = "1.0"
 ratatui = "0.29"
 crossterm = "0.28"
 
+# MCP (Model Context Protocol) server for LLM-friendly administration
+rmcp = { version = "0.7", features = ["transport-sse-server", "server-side-http"] }
+# JSON Schema generation (used by rmcp tool macros)
+schemars = "0.8"
+
 # ACME / Let's Encrypt
 # instant-acme = "0.6"  # uncomment when ready for SSL module

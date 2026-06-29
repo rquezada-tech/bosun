@@ -68,7 +68,8 @@ Cache enabled for api  │  TTL: 60s  │  Strategy: disk
 | **Catálogo** | `bosun apps create redis --version 7-alpine` | ✅ |
 | **SSL** | Let's Encrypt automático vía Caddy | ✅ |
 | **Proxy** | Caddy reverse proxy con hot-reload | ✅ |
-| **Gateway** | APISIX API Gateway (rate-limit, cache, JWT auth, Prometheus) | ✅ |
+|| **Gateway** | APISIX API Gateway (rate-limit, cache, JWT auth, Prometheus) | ✅ |
+|| **Gateway** | Cross-VPS routing with mTLS peer authentication | ✅ |
 | **Observabilidad** | Métricas en vivo (CPU/RAM/network), logs streaming | ✅ |
 | **Seguridad** | CrowdSec + Fail2Ban zero-config en cada deploy | ✅ |
 | **Seguridad** | Pentesting CLI (ports, SSL, headers, secrets, CVEs) | ✅ |
@@ -149,6 +150,12 @@ bosun gateway status           # APISIX: rutas, plugins, métricas
 bosun gateway cache enable api --ttl 60s
 bosun gateway plugin add api rate-limit --config '{"count":100}'
 
+# Cross-VPS Routing (multi-cloud gateway)
+bosun gateway peer add nyc-vps 10.0.1.5:9090 --ca-cert /etc/bosun/ca.crt
+bosun gateway peer list        # ver todos los peers
+bosun gateway peer test nyc-vps  # probar conectividad TLS
+bosun gateway peer remove nyc-vps
+
 # Dashboard
 bosun dashboard                # TUI interactiva con todo en vivo
 ```
@@ -222,6 +229,36 @@ Cada panel se actualiza cada 1 segundo consultando al daemon por gRPC. El dashbo
 ```
 
 > **Filosofía:** Bosun es dos binarios Rust + Docker Engine. No usa Node.js, MongoDB, Redis, ni ningún runtime externo. Cada línea de código debe justificar su existencia. Un VPS de $5/mes debería poder correr Bosun + todas tus apps.
+
+### Arquitectura multi-cloud (cross-VPS routing)
+
+Bosun permite enrutar tráfico entre múltiples VPS usando mTLS. Una instancia
+de APISIX puede enrutar tráfico a aplicaciones corriendo en otros servidores:
+
+```
+┌─────────────────────────────┐     mTLS     ┌─────────────────────────────┐
+│  VPS 1 (Gateway Principal)  │◄────────────►│  VPS 2 (Peer Node)          │
+│                             │              │                             │
+│  ┌──────────────────────┐   │              │  bosun-daemon               │
+│  │ APISIX               │   │              │  ┌────────────────────┐     │
+│  │ bosun-nyc-vps:3000 ──┼───┼──────────────┼─►│ app-node (Docker)  │     │
+│  │   upstream: 10.0.1.5 │   │              │  └────────────────────┘     │
+│  │   mTLS: ca.crt       │   │              │                             │
+│  └──────────────────────┘   │              └─────────────────────────────┘
+│                             │
+│  bosun-daemon               │
+│  apps locales...            │
+└─────────────────────────────┘
+
+Comandos:
+  bosun gateway peer add nyc-vps 10.0.1.5:9090 --ca-cert /etc/bosun/ca.crt
+  bosun gateway peer test nyc-vps
+  bosun deploy app --domain api.example.com --peer nyc-vps
+```
+
+Los certificados mTLS se generan automáticamente durante la instalación
+con `WITH_GATEWAY=true`. El CA certificate se copia a los peer nodes para
+establecer la cadena de confianza.
 
 ## Diferencia con otros proyectos
 

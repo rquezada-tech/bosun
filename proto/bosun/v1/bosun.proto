@@ -173,6 +173,13 @@ service Bosun {
     rpc GetSecurityStatus(GetSecurityStatusRequest) returns (GetSecurityStatusResponse);
     rpc GetSecurityDecisions(GetSecurityDecisionsRequest) returns (GetSecurityDecisionsResponse);
 
+    // Cluster (multi-node orchestration)
+    rpc AddNode(AddNodeRequest) returns (AddNodeResponse);
+    rpc RemoveNode(RemoveNodeRequest) returns (RemoveNodeResponse);
+    rpc ListNode(ListNodeRequest) returns (ListNodeResponse);
+    rpc DeployToNode(DeployToNodeRequest) returns (DeployToNodeResponse);
+    rpc ClusterMetrics(ClusterMetricsRequest) returns (ClusterMetricsResponse);
+
     // Gateway (APISIX)
     rpc GetGatewayStatus(GetGatewayStatusRequest) returns (GetGatewayStatusResponse);
     rpc ListGatewayRoutes(ListGatewayRoutesRequest) returns (ListGatewayRoutesResponse);
@@ -181,6 +188,12 @@ service Bosun {
     rpc GetGatewayCacheStats(GetGatewayCacheStatsRequest) returns (GetGatewayCacheStatsResponse);
     rpc PurgeGatewayCache(PurgeGatewayCacheRequest) returns (PurgeGatewayCacheResponse);
     rpc GetGatewayMetrics(GetGatewayMetricsRequest) returns (GetGatewayMetricsResponse);
+
+    // Cross-VPS Peer Management (mTLS)
+    rpc AddPeer(AddPeerRequest) returns (AddPeerResponse);
+    rpc ListPeers(ListPeersRequest) returns (ListPeersResponse);
+    rpc RemovePeer(RemovePeerRequest) returns (RemovePeerResponse);
+    rpc TestPeer(TestPeerRequest) returns (TestPeerResponse);
 }
 
 // --- Request / Response messages ---
@@ -359,4 +372,93 @@ message GetGatewayMetricsRequest {}
 message GetGatewayMetricsResponse {
     // Raw Prometheus metrics text
     string metrics_text = 1;
+}
+
+// --- Cross-VPS Peer messages ---
+
+message PeerInfo {
+    string name = 1;
+    string addr = 2;
+    string cert_path = 3;
+    string status = 4;  // "online", "offline", "unknown"
+}
+
+message AddPeerRequest {
+    string name = 1;
+    string addr = 2;
+    string cert_path = 3;
+}
+message AddPeerResponse {
+    PeerInfo peer = 1;
+}
+
+message ListPeersRequest {}
+message ListPeersResponse {
+    repeated PeerInfo peers = 1;
+}
+
+message RemovePeerRequest {
+    string name = 1;
+}
+message RemovePeerResponse {}
+
+message TestPeerRequest {
+    string name = 1;
+}
+message TestPeerResponse {
+    PeerInfo peer = 1;
+}
+
+// --- Cluster (multi-node orchestration) messages ---
+
+message NodeInfo {
+    string name = 1;
+    string addr = 2;
+    string status = 3;
+    map<string, string> labels = 4;
+    uint32 app_count = 5;
+    double cpu_percent = 6;
+}
+
+message AddNodeRequest {
+    string name = 1;
+    string addr = 2;
+    map<string, string> labels = 3;
+}
+
+message AddNodeResponse {
+    string name = 1;
+    string status = 2;
+}
+
+message RemoveNodeRequest {
+    string name = 1;
+}
+
+message RemoveNodeResponse {
+    string name = 1;
+    string status = 2;
+}
+
+message ListNodeRequest {}
+
+message ListNodeResponse {
+    repeated NodeInfo nodes = 1;
+}
+
+message DeployToNodeRequest {
+    string node_name = 1;
+    DeployRequest deploy = 2;
+}
+
+message DeployToNodeResponse {
+    string node_name = 1;
+    string status = 2;
+    string message = 3;
+}
+
+message ClusterMetricsRequest {}
+
+message ClusterMetricsResponse {
+    repeated NodeInfo nodes = 1;
 }

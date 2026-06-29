@@ -46,6 +46,11 @@ impl Store {
                 domain TEXT,
                 port INTEGER,
                 env_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS nodes (
+                name TEXT PRIMARY KEY,
+                addr TEXT NOT NULL,
+                labels_json TEXT NOT NULL DEFAULT '{}'
             );",
         )?;
         tracing::info!("Database tables initialized");
@@ -277,6 +282,74 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // ── Cluster node management ─────────────────────────────────────
+
+    /// Insert or update a cluster node.
+    pub fn upsert_node(
+        &self,
+        name: &str,
+        addr: &str,
+        labels: &std::collections::HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let labels_json = serde_json::to_string(labels)?;
+        conn.execute(
+            "INSERT INTO nodes (name, addr, labels_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET addr = ?2, labels_json = ?3",
+            rusqlite::params![name, addr, labels_json],
+        )?;
+        Ok(())
+    }
+
+    /// Get a node by name.
+    pub fn get_node(&self, name: &str) -> anyhow::Result<Option<NodeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, addr, labels_json FROM nodes WHERE name = ?1",
+        )?;
+        let result = stmt
+            .query_row(rusqlite::params![name], |row| {
+                Ok(NodeRecord {
+                    name: row.get(0)?,
+                    addr: row.get(1)?,
+                    labels_json: row.get(2)?,
+                })
+            })
+            .optional()?;
+        Ok(result)
+    }
+
+    /// List all cluster nodes.
+    pub fn list_nodes(&self) -> anyhow::Result<Vec<NodeRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, addr, labels_json FROM nodes ORDER BY name",
+        )?;
+        let records = stmt
+            .query_map([], |row| {
+                Ok(NodeRecord {
+                    name: row.get(0)?,
+                    addr: row.get(1)?,
+                    labels_json: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(records)
+    }
+
+    /// Delete a node by name.
+    pub fn delete_node(&self, name: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM nodes WHERE name = ?1",
+            rusqlite::params![name],
+        )?;
+        if affected == 0 {
+            anyhow::bail!("Node '{}' not found", name);
+        }
+        Ok(())
+    }
 }
 
 /// A row from the `users` table.
@@ -294,6 +367,14 @@ pub struct AppRecord {
     pub domain: Option<String>,
     pub port: Option<u32>,
     pub env_json: String,
+}
+
+/// A row from the `nodes` table.
+#[derive(Debug, Clone)]
+pub struct NodeRecord {
+    pub name: String,
+    pub addr: String,
+    pub labels_json: String,
 }
 
 /// Helper trait for rusqlite optional row fetching.

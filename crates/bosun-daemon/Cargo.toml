@@ -37,6 +37,8 @@ toml.workspace = true
 jsonwebtoken.workspace = true
 bcrypt.workspace = true
 chrono.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
 
 # Uncomment when ready
 # instant-acme.workspace = true
