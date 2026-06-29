@@ -7,6 +7,7 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash
+#   # With Swarm: WITH_SWARM=true sudo bash install.sh
 #
 set -euo pipefail
 
@@ -41,6 +42,7 @@ BOSUN_WEBHOOK_LISTEN="${BOSUN_WEBHOOK_LISTEN:-0.0.0.0:9091}"
 BOSUN_RUST_LOG="${BOSUN_RUST_LOG:-bosun_daemon=info}"
 WITH_GATEWAY="${WITH_GATEWAY:-false}"  # Set to true to install APISIX API Gateway
 WITH_CROWDSEC="${WITH_CROWDSEC:-false}"  # Set to true to install CrowdSec IDS/IPS
+WITH_SWARM="${WITH_SWARM:-false}"  # Set to true to initialize Docker Swarm during install
 # If WITH_CROWDSEC is not set, install fail2ban as lightweight fallback
 
 CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
@@ -119,6 +121,48 @@ fi
 
 # Ensure current user can access Docker (if we created a bosun user already)
 # We'll handle group membership in the user-creation step below.
+
+# ── Step 3: Docker Swarm initialization (optional, with --with-swarm) ────────
+header "Step 3/15: Docker Swarm (optional)"
+
+if [ "$WITH_SWARM" = "true" ]; then
+    info "Docker Swarm requested via --with-swarm"
+
+    # Check if already in Swarm mode
+    if docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+        info "Docker is already in Swarm mode."
+    else
+        info "Initializing Docker Swarm..."
+        if docker swarm init 2>/dev/null; then
+            info "Docker Swarm initialized. This node is now a Swarm manager."
+
+            # Show join token
+            WORKER_TOKEN="$(docker swarm join-token -q worker 2>/dev/null || echo '')"
+            MANAGER_TOKEN="$(docker swarm join-token -q manager 2>/dev/null || echo '')"
+
+            echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+            echo -e "  ${GREEN}║  Docker Swarm initialized!                                  ║${NC}"
+            echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+            echo ""
+            echo -e "  To join worker nodes to this cluster:"
+            echo -e "    docker swarm join --token ${WORKER_TOKEN} <MANAGER_IP>:2377"
+            echo ""
+            if [ -n "$MANAGER_TOKEN" ]; then
+                echo -e "  To join manager nodes (for HA):"
+                echo -e "    docker swarm join --token ${MANAGER_TOKEN} <MANAGER_IP>:2377"
+                echo ""
+            fi
+        else
+            warn "Docker Swarm init failed. Continuing without Swarm."
+            warn "You can initialize later: docker swarm init"
+        fi
+    fi
+else
+    info "Docker Swarm not requested. Skipping."
+    info "  To enable later: re-run with WITH_SWARM=true or:"
+    info "    docker swarm init"
+    info "    # Or use: bosun cluster init"
+fi
 
 # ── Step 3: Install Caddy reverse proxy ────────────────────────────────────────
 header "Step 3/13: Installing Caddy reverse proxy"
@@ -673,13 +717,22 @@ echo ""
 echo -e "  4. Create additional users:"
 echo -e "     bosun create-user myuser --password s3cret --role user"
 echo ""
-echo -e "  5. Configure git push auto-deploy via webhook:"
-echo -e "     curl -X POST https://YOUR_SERVER_IP:$WEBHOOK_PORT/hooks/my-app \\"
-echo -e "       -H 'X-Bosun-Secret: YOUR_WEBHOOK_SECRET' \\"
-echo -e "       -H 'X-Bosun-Strategy: rolling' \\"
-echo -e "       -H 'Content-Type: application/json' \\"
-echo -e "       -d '{\"ref\":\"refs/heads/main\"}'"
-echo ""
+echo -e \"  5. Configure git push auto-deploy via webhook:\"
+echo -e \"     curl -X POST https://YOUR_SERVER_IP:$WEBHOOK_PORT/hooks/my-app \\\\\"
+echo -e \"       -H 'X-Bosun-Secret: YOUR_WEBHOOK_SECRET' \\\\\"
+echo -e \"       -H 'X-Bosun-Strategy: rolling' \\\\\"
+echo -e \"       -H 'Content-Type: application/json' \\\\\"
+echo -e \"       -d '{\\\"ref\\\":\\\"refs/heads/main\\\"}'\"
+echo \"\"
+
+if [ \"$WITH_SWARM\" = \"true\" ]; then
+    echo -e \"  6. ${CYAN}Docker Swarm Cluster Management:${NC}\"
+    echo -e \"     ${CYAN}List nodes:${NC}     bosun cluster nodes\"
+    echo -e \"     ${CYAN}Join worker:${NC}    bosun cluster join <TOKEN> <MANAGER_IP>:2377\"
+    echo -e \"     ${CYAN}Leave Swarm:${NC}    bosun cluster leave\"
+    echo -e \"     ${CYAN}Manage nodes:${NC}   docker node ls  (Docker's native CLI)\"
+    echo \"\"
+fi
 echo -e "     Available strategies via X-Bosun-Strategy header:"
 echo -e "       direct      — stop old, start new (simplest)"
 echo -e "       rolling     — rolling update via Docker (default for webhooks)"

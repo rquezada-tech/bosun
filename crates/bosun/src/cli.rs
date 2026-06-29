@@ -87,6 +87,7 @@ impl Cli {
             Command::Gateway { .. } | Command::Security { .. } => {
                 anyhow::bail!("Command not yet available in this build")
             }
+            Command::Cluster { sub } => self.run_cluster(sub).await,
             Command::Dashboard => {
                 use crate::dashboard::Dashboard;
                 let mut dashboard = Dashboard::new(client);
@@ -1733,6 +1734,226 @@ footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px s
 
         Ok(())
     }
+
+    // ── Cluster ────────────────────────────────────────────────────
+
+    async fn run_cluster(&self, sub: &ClusterCmd) -> anyhow::Result<()> {
+        match sub {
+            ClusterCmd::Init { advertise_addr } => {
+                self.cluster_init(advertise_addr.as_deref()).await
+            }
+            ClusterCmd::Join { token, addr } => {
+                self.cluster_join(token, addr).await
+            }
+            ClusterCmd::Nodes => self.cluster_nodes().await,
+            ClusterCmd::Leave { force } => self.cluster_leave(*force).await,
+        }
+    }
+
+    async fn cluster_init(&self, advertise_addr: Option<&str>) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("🐝 Initializing Docker Swarm...");
+        }
+
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("swarm").arg("init");
+
+        if let Some(addr) = advertise_addr {
+            cmd.arg("--advertise-addr").arg(addr);
+        }
+
+        let output = cmd.output().context("Failed to run 'docker swarm init'. Is Docker installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker swarm init failed:\n{}", stderr.trim());
+        }
+
+        // Get the worker join token
+        let token_output = std::process::Command::new("docker")
+            .arg("swarm")
+            .arg("join-token")
+            .arg("worker")
+            .arg("-q")
+            .output()
+            .context("Failed to get Swarm join token")?;
+
+        let worker_token = String::from_utf8_lossy(&token_output.stdout).trim().to_string();
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "action": "swarm_init",
+                "status": "ok",
+                "worker_join_token": worker_token,
+            }))?);
+        } else {
+            println!("\n✔ Docker Swarm initialized successfully!\n");
+            println!("  To join additional worker nodes, run this on each worker:");
+            println!("    docker swarm join --token {} \\", worker_token);
+            println!("      <MANAGER_IP>:2377\n");
+            println!("  For manager nodes (use with caution):");
+            println!("    bosun cluster init  (on manager)");
+            println!("    docker swarm join-token manager  (to get manager token)");
+        }
+
+        Ok(())
+    }
+
+    async fn cluster_join(&self, token: &str, addr: &str) -> anyhow::Result<()> {
+        if !self.json {
+            eprintln!("🐝 Joining Docker Swarm at {}...", addr);
+        }
+
+        let output = std::process::Command::new("docker")
+            .arg("swarm")
+            .arg("join")
+            .arg("--token")
+            .arg(token)
+            .arg(addr)
+            .output()
+            .context("Failed to run 'docker swarm join'. Is Docker installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker swarm join failed:\n{}", stderr.trim());
+        }
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "action": "swarm_join",
+                "status": "ok",
+                "manager": addr,
+            }))?);
+        } else {
+            println!("✔ Successfully joined Docker Swarm at {}", addr);
+        }
+
+        Ok(())
+    }
+
+    async fn cluster_nodes(&self) -> anyhow::Result<()> {
+        let output = std::process::Command::new("docker")
+            .arg("node")
+            .arg("ls")
+            .arg("--format")
+            .arg("{{.ID}}\t{{.Hostname}}\t{{.Status}}\t{{.Availability}}\t{{.ManagerStatus}}")
+            .output()
+            .context("Failed to run 'docker node ls'. Is Docker in Swarm mode?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker node ls failed:\n{}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if self.json {
+            let nodes: Vec<serde_json::Value> = stdout
+                .lines()
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    serde_json::json!({
+                        "id": parts.get(0).map(|s| s.trim_matches('*').trim()).unwrap_or(""),
+                        "hostname": parts.get(1).map(|s| s.trim()).unwrap_or(""),
+                        "status": parts.get(2).map(|s| s.trim()).unwrap_or(""),
+                        "availability": parts.get(3).map(|s| s.trim()).unwrap_or(""),
+                        "role": if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
+                            "manager"
+                        } else {
+                            "worker"
+                        },
+                    })
+                })
+                .collect();
+
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "nodes": nodes,
+            }))?);
+        } else {
+            use tabled::{Table, Tabled};
+            #[derive(Tabled)]
+            struct NodeRow {
+                #[tabled(rename = "ID")]
+                id: String,
+                #[tabled(rename = "HOSTNAME")]
+                hostname: String,
+                #[tabled(rename = "STATUS")]
+                status: String,
+                #[tabled(rename = "AVAILABILITY")]
+                availability: String,
+                #[tabled(rename = "ROLE")]
+                role: String,
+            }
+
+            let rows: Vec<NodeRow> = stdout
+                .lines()
+                .map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    let role = if parts.get(4).map(|s| s.contains("Leader") || s.contains("Reachable")).unwrap_or(false) {
+                        "manager"
+                    } else {
+                        "worker"
+                    };
+                    NodeRow {
+                        id: parts.get(0).map(|s| s.trim_matches('*').trim().to_string()).unwrap_or_default(),
+                        hostname: parts.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
+                        status: parts.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
+                        availability: parts.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
+                        role: role.to_string(),
+                    }
+                })
+                .collect();
+
+            if rows.is_empty() {
+                println!("No nodes found. Is Docker in Swarm mode?");
+            } else {
+                let table = Table::new(rows);
+                println!("{table}");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn cluster_leave(&self, force: bool) -> anyhow::Result<()> {
+        if !self.json {
+            if force {
+                eprintln!("🐝 Force-leaving Docker Swarm...");
+            } else {
+                eprintln!("🐝 Leaving Docker Swarm...");
+            }
+        }
+
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("swarm").arg("leave");
+
+        if force {
+            cmd.arg("--force");
+        }
+
+        let output = cmd.output().context("Failed to run 'docker swarm leave'. Is Docker installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("use --force") && !force {
+                anyhow::bail!(
+                    "This is the last manager. Use --force to leave:\n  bosun cluster leave --force"
+                );
+            }
+            anyhow::bail!("Docker swarm leave failed:\n{}", stderr.trim());
+        }
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "action": "swarm_leave",
+                "status": "ok",
+            }))?);
+        } else {
+            println!("✔ Left Docker Swarm");
+        }
+
+        Ok(())
+    }
 }
 
 // ── Subcommand types ──────────────────────────────────────────────
@@ -1816,6 +2037,36 @@ pub enum Command {
     },
     /// Launch interactive real-time dashboard TUI
     Dashboard,
+    /// Manage Docker Swarm cluster (init, join, nodes, leave)
+    Cluster {
+        #[command(subcommand)]
+        sub: ClusterCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ClusterCmd {
+    /// Initialize Docker Swarm on this node
+    Init {
+        /// Advertise address for other nodes to connect
+        #[arg(long)]
+        advertise_addr: Option<String>,
+    },
+    /// Join an existing Docker Swarm cluster
+    Join {
+        /// Swarm join token (worker or manager)
+        token: String,
+        /// Address of the Swarm manager (e.g., 192.168.1.10:2377)
+        addr: String,
+    },
+    /// List all nodes in the Docker Swarm
+    Nodes,
+    /// Leave the Docker Swarm (use --force for managers)
+    Leave {
+        /// Force leave even if this is the last manager
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -139,6 +139,11 @@ async fn main() -> anyhow::Result<()> {
     // Connect to Docker
     let docker = docker::DockerClient::connect().await?;
 
+    // Ensure bosun network exists (overlay in Swarm mode, bridge otherwise)
+    if let Err(e) = docker.ensure_bosun_network().await {
+        tracing::warn!("Failed to ensure bosun network: {} (continuing)", e);
+    }
+
     // Clone DockerClient for the webhook server before moving the original
     // into the shared Arc for gRPC + health checker.
     let docker_webhook = docker.clone();

@@ -14,6 +14,12 @@ use bollard::container::{
 use bollard::image::BuildImageOptions;
 use bollard::models::{HostConfig, PortBinding};
 use bollard::secret::ContainerSummary;
+use bollard::service::{EndpointSpec, ListServicesOptions, UpdateServiceOptions};
+use bollard::network::{CreateNetworkOptions, InspectNetworkOptions};
+use bollard::models::{
+    EndpointPortConfig, ServiceSpec, ServiceUpdateStatusStateEnum,
+    TaskSpec, TaskSpecContainerSpec,
+};
 use crate::server::v1::{App, AppStatus, LogEntry};
 use futures_util::StreamExt;
 
@@ -1354,6 +1360,452 @@ impl DockerClient {
 
         Ok(())
     }
+
+    // ── Docker Swarm ────────────────────────────────────────────────────────
+
+    /// Check if the Docker daemon is in Swarm mode by querying docker info.
+    pub fn is_swarm(&self) -> anyhow::Result<bool> {
+        let output = std::process::Command::new("docker")
+            .arg("info")
+            .arg("--format")
+            .arg("{{.Swarm.LocalNodeState}}")
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run docker info: {}", e))?;
+
+        if !output.status.success() {
+            // If docker info fails, assume no swarm
+            return Ok(false);
+        }
+
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(state == "active")
+    }
+
+    /// Ensure the "bosun" overlay network exists (creates it if needed).
+    /// In Swarm mode, this creates an overlay network for multi-node service discovery.
+    /// In non-Swarm mode, it creates a regular bridge network.
+    pub async fn ensure_bosun_network(&self) -> anyhow::Result<()> {
+        let is_swarm = self.is_swarm().unwrap_or(false);
+
+        // Check if network already exists
+        let existing = self
+            .inner
+            .inspect_network("bosun", Some(InspectNetworkOptions::<String>::default()))
+            .await;
+
+        if existing.is_ok() {
+            tracing::info!("Bosun network already exists");
+            return Ok(());
+        }
+
+        tracing::info!(
+            "Creating bosun network (driver: {})...",
+            if is_swarm { "overlay" } else { "bridge" }
+        );
+
+        let driver = if is_swarm { "overlay" } else { "bridge" };
+
+        let options: CreateNetworkOptions<String> = CreateNetworkOptions {
+            name: "bosun".to_string(),
+            driver: driver.to_string(),
+            attachable: true,
+            ..Default::default()
+        };
+
+        self.inner
+            .create_network(options)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create bosun network: {}", e))?;
+
+        tracing::info!("Bosun {} network created successfully", driver);
+        Ok(())
+    }
+
+    /// Deploy an app as a Docker Swarm service.
+    /// Creates a Docker service instead of a container, enabling native
+    /// rolling updates, overlay networking, and multi-node scheduling.
+    pub async fn deploy_service(
+        &self,
+        app_name: &str,
+        image: &str,
+        domain: Option<&str>,
+        port: u16,
+        env_vars: &HashMap<String, String>,
+        replicas: u64,
+    ) -> anyhow::Result<()> {
+        tracing::info!(
+            "Deploying Swarm service '{}' (image={}, port={}, replicas={})",
+            app_name,
+            image,
+            port,
+            replicas
+        );
+
+        // Convert env_vars to "KEY=VALUE" strings
+        let env: Vec<String> = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        // Build labels
+        let mut labels = HashMap::new();
+        labels.insert("managed-by".to_string(), "bosun".to_string());
+        labels.insert("bosun.app".to_string(), app_name.to_string());
+        if let Some(d) = domain {
+            labels.insert("bosun.domain".to_string(), d.to_string());
+        }
+        labels.insert("bosun.port".to_string(), port.to_string());
+        labels.insert("bosun.health-check".to_string(), "true".to_string());
+
+        // Build task spec with container spec
+        let container_spec = TaskSpecContainerSpec {
+            image: Some(image.to_string()),
+            env: Some(env),
+            labels: Some(labels.clone()),
+            ..Default::default()
+        };
+
+        let task_template = TaskSpec {
+            container_spec: Some(container_spec),
+            ..Default::default()
+        };
+
+        let endpoint_port = EndpointPortConfig {
+            protocol: Some(bollard::models::EndpointPortConfigProtocolEnum::TCP),
+            target_port: Some(port as i64),
+            published_port: Some(port as i64),
+            ..Default::default()
+        };
+
+        let endpoint_spec = EndpointSpec {
+            mode: Some(bollard::models::EndpointSpecModeEnum::VIP),
+            ports: Some(vec![endpoint_port]),
+        };
+
+        let replicated = bollard::models::ServiceSpecModeReplicated {
+            replicas: Some(replicas as i64),
+        };
+
+        let mode = bollard::models::ServiceSpecMode {
+            replicated: Some(replicated),
+            ..Default::default()
+        };
+
+        let service_spec = ServiceSpec {
+            name: Some(app_name.to_string()),
+            labels: Some(labels.clone()),
+            task_template: Some(task_template),
+            mode: Some(mode),
+            endpoint_spec: Some(endpoint_spec),
+            ..Default::default()
+        };
+
+        tracing::info!("Creating Swarm service '{}'...", app_name);
+        let service = self
+            .inner
+            .create_service(service_spec, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create Swarm service '{}': {}", app_name, e))?;
+
+        tracing::info!(
+            "Swarm service '{}' created (id={})",
+            app_name,
+            service.id.unwrap_or_default()
+        );
+
+        Ok(())
+    }
+
+    /// Update an existing Docker Swarm service (triggers native rolling update).
+    /// Updates the image and environment, Docker handles graceful rolling update.
+    pub async fn update_service(
+        &self,
+        app_name: &str,
+        image: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> anyhow::Result<()> {
+        tracing::info!("Updating Swarm service '{}' (image={})...", app_name, image);
+
+        let env: Vec<String> = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .collect();
+
+        let container_spec = TaskSpecContainerSpec {
+            image: Some(image.to_string()),
+            env: Some(env),
+            ..Default::default()
+        };
+
+        let task_template = TaskSpec {
+            container_spec: Some(container_spec),
+            ..Default::default()
+        };
+
+        let service_spec = ServiceSpec {
+            name: Some(app_name.to_string()),
+            task_template: Some(task_template),
+            ..Default::default()
+        };
+
+        // Get current service version for update
+        let current = self
+            .inner
+            .inspect_service(app_name, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to inspect service '{}': {}", app_name, e))?;
+
+        let version = current
+            .version
+            .and_then(|v| v.index)
+            .unwrap_or(0);
+
+        let update_options = UpdateServiceOptions {
+            version,
+            ..Default::default()
+        };
+
+        self.inner
+            .update_service(
+                app_name,
+                service_spec,
+                update_options,
+                None::<bollard::auth::DockerCredentials>,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update Swarm service '{}': {}", app_name, e))?;
+
+        tracing::info!("Swarm service '{}' update triggered (rolling)", app_name);
+        Ok(())
+    }
+
+    /// Remove a Docker Swarm service by name.
+    pub async fn remove_service(&self, app_name: &str) -> anyhow::Result<()> {
+        tracing::info!("Removing Swarm service '{}'...", app_name);
+
+        self.inner
+            .delete_service(app_name)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to remove Swarm service '{}': {}", app_name, e))?;
+
+        tracing::info!("Swarm service '{}' removed", app_name);
+        Ok(())
+    }
+
+    /// List all Docker Swarm services managed by Bosun.
+    pub async fn list_services(&self) -> anyhow::Result<Vec<App>> {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec!["managed-by=bosun".to_string()],
+        );
+
+        let options = ListServicesOptions {
+            filters,
+            ..Default::default()
+        };
+
+        let services = self
+            .inner
+            .list_services(Some(options))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list Swarm services: {}", e))?;
+
+        let apps = services
+            .into_iter()
+            .map(|s| {
+                // Extract spec once to avoid move issues
+                let spec = s.spec.clone();
+
+                let name = spec
+                    .as_ref()
+                    .and_then(|sp| sp.name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let status = if let Some(update_status) = &s.update_status {
+                    match update_status.state {
+                        Some(ServiceUpdateStatusStateEnum::COMPLETED)
+                        | Some(ServiceUpdateStatusStateEnum::PAUSED) => AppStatus::Running,
+                        Some(ServiceUpdateStatusStateEnum::UPDATING)
+                        | Some(ServiceUpdateStatusStateEnum::ROLLBACK_STARTED) => AppStatus::Deploying,
+                        _ => AppStatus::Running,
+                    }
+                } else {
+                    AppStatus::Running
+                };
+
+                let labels = spec.as_ref().and_then(|sp| sp.labels.clone()).unwrap_or_default();
+                let domain = labels.get("bosun.domain").cloned();
+                let port = labels
+                    .get("bosun.port")
+                    .and_then(|p| p.parse().ok());
+
+                let replicas = spec
+                    .as_ref()
+                    .and_then(|sp| sp.mode.as_ref())
+                    .and_then(|m| m.replicated.as_ref())
+                    .and_then(|r| r.replicas)
+                    .unwrap_or(1) as u32;
+
+                App {
+                    name,
+                    status: status.into(),
+                    domain,
+                    port,
+                    instances: Some(replicas),
+                    env_keys: vec![],
+                    restart_count: 0,
+                }
+            })
+            .collect();
+
+        Ok(apps)
+    }
+
+    /// Initialize Docker Swarm on this node (becomes a manager).
+    /// Uses the `docker` CLI binary since bollard 0.18 doesn't expose Swarm init.
+    pub fn init_swarm(&self, advertise_addr: Option<&str>) -> anyhow::Result<String> {
+        tracing::info!("Initializing Docker Swarm...");
+
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("swarm").arg("init");
+
+        if let Some(addr) = advertise_addr {
+            cmd.arg("--advertise-addr").arg(addr);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run 'docker swarm init': {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker swarm init failed: {}", stderr.trim());
+        }
+
+        tracing::info!("Docker Swarm initialized successfully");
+
+        // Return the worker join token
+        self.get_swarm_join_token("worker")
+    }
+
+    /// Get a Swarm join token (worker or manager).
+    fn get_swarm_join_token(&self, role: &str) -> anyhow::Result<String> {
+        let output = std::process::Command::new("docker")
+            .arg("swarm")
+            .arg("join-token")
+            .arg(role)
+            .arg("-q")
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to get Swarm join token: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to get Swarm join token: {}", stderr.trim());
+        }
+
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(token)
+    }
+
+    /// Join this node to an existing Docker Swarm as a worker or manager.
+    pub fn join_swarm(&self, token: &str, addr: &str) -> anyhow::Result<()> {
+        tracing::info!("Joining Docker Swarm at {}...", addr);
+
+        let output = std::process::Command::new("docker")
+            .arg("swarm")
+            .arg("join")
+            .arg("--token")
+            .arg(token)
+            .arg(addr)
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run 'docker swarm join': {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker swarm join failed: {}", stderr.trim());
+        }
+
+        tracing::info!("Successfully joined Docker Swarm");
+        Ok(())
+    }
+
+    /// Leave the Docker Swarm (removes this node from the cluster).
+    pub fn leave_swarm(&self, force: bool) -> anyhow::Result<()> {
+        tracing::info!("Leaving Docker Swarm (force={})...", force);
+
+        let mut cmd = std::process::Command::new("docker");
+        cmd.arg("swarm").arg("leave");
+
+        if force {
+            cmd.arg("--force");
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run 'docker swarm leave': {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker swarm leave failed: {}", stderr.trim());
+        }
+
+        tracing::info!("Left Docker Swarm successfully");
+        Ok(())
+    }
+
+    /// List all nodes in the Docker Swarm.
+    /// Parses `docker node ls` output.
+    pub fn list_nodes(&self) -> anyhow::Result<Vec<ClusterNode>> {
+        let output = std::process::Command::new("docker")
+            .arg("node")
+            .arg("ls")
+            .arg("--format")
+            .arg("{{.ID}}\t{{.Hostname}}\t{{.Status}}\t{{.Availability}}\t{{.ManagerStatus}}")
+            .output()
+            .map_err(|e| anyhow::anyhow!("Failed to run 'docker node ls': {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Docker node ls failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut nodes = Vec::new();
+
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 5 {
+                let role = if parts[4].contains("Leader") || parts[4].contains("Reachable") {
+                    "manager"
+                } else {
+                    "worker"
+                };
+
+                nodes.push(ClusterNode {
+                    id: parts[0].trim_matches('*').trim().to_string(),
+                    hostname: parts[1].trim().to_string(),
+                    status: parts[2].trim().to_string(),
+                    availability: parts[3].trim().to_string(),
+                    role: role.to_string(),
+                    addr: String::new(),
+                });
+            }
+        }
+
+        Ok(nodes)
+    }
+}
+
+/// Cluster node information returned by list_nodes().
+#[derive(Debug, Clone)]
+pub struct ClusterNode {
+    pub id: String,
+    pub hostname: String,
+    pub role: String,
+    pub availability: String,
+    pub status: String,
+    pub addr: String,
 }
 
 #[cfg(test)]
