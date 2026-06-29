@@ -76,5 +76,9 @@ tar = "0.4"
 # Gzip compression for backups
 flate2 = "1.0"
 
+# TUI dashboard
+ratatui = "0.29"
+crossterm = "0.28"
+
 # ACME / Let's Encrypt
 # instant-acme = "0.6"  # uncomment when ready for SSL module

@@ -87,6 +87,12 @@ impl Cli {
             Command::Gateway { .. } | Command::Security { .. } => {
                 anyhow::bail!("Command not yet available in this build")
             }
+            Command::Dashboard => {
+                use crate::dashboard::Dashboard;
+                let mut dashboard = Dashboard::new(client);
+                dashboard.run()?;
+                Ok(())
+            }
         }
     }
 }
@@ -1808,6 +1814,8 @@ pub enum Command {
         #[command(subcommand)]
         sub: SecurityCmd,
     },
+    /// Launch interactive real-time dashboard TUI
+    Dashboard,
 }
 
 #[derive(Subcommand)]

@@ -12,6 +12,7 @@ use clap::Parser;
 mod cli;
 mod client;
 mod proto;
+mod dashboard;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -153,6 +153,38 @@ bosun gateway plugin add api rate-limit --config '{"count":100}'
 bosun dashboard                # TUI interactiva con todo en vivo
 ```
 
+### Dashboard TUI
+
+El dashboard TUI (`bosun dashboard`) muestra en tiempo real un panel interactivo de 4 cuadrantes construido con ratatui:
+
+```
+┌─ Bosun Dashboard — 4 apps deployed — last refresh: 0s ago ────────────┐
+│┌─ Apps (l=logs, r=restart) ───┐┌─ Security ──────────────────────────┐│
+││ NAME   STATUS  CPU%  RAM     ││ Engine: CrowdSec 1.6               ││
+││ api    Running 2.1%  48 MB   ││ Attacks blocked: 47                ││
+││ front  Running 0.8%  32 MB   ││ Active bans: 12                    ││
+││ redis  Running 0.3%  12 MB   ││ Last alert: SQLi from 45.x (2m ago)││
+││ pg     Running 1.2%  256 MB  ││                                    ││
+│└───────────────────────────────┘└────────────────────────────────────┘│
+│┌─ Gateway (APISIX) ───────────┐┌─ Backups ───────────────────────────┐│
+││ Status: 3.10.0 (uptime: 14d) ││ APP     SIZE      AGE              ││
+││ Routes: 4                    ││ api     128.3 MB  2h 15m           ││
+││ Cache hit rate: 78.3%        ││ redis   5.2 MB    3d 7h            ││
+││ Active plugins: rate-limit,  ││ pg      512.4 MB  12h 3m           ││
+││   proxy-cache, jwt-auth      ││                                    ││
+│└───────────────────────────────┘└────────────────────────────────────┘│
+│ OK │ q:quit Tab:switch ↑↓:select l:logs r:restart s:security Panel: Apps│
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+- **Tab**: alternar entre paneles (Apps → Security → Gateway → Backups)
+- **l**: ver logs en vivo de la app seleccionada (sale y vuelve al TUI)
+- **r**: reiniciar la app seleccionada
+- **s**: saltar al panel de seguridad
+- **q / Esc**: salir
+
+Cada panel se actualiza cada 1 segundo consultando al daemon por gRPC. El dashboard maneja redimensiones de terminal y colorea los estados de las apps (verde=running, rojo=stopped/failed, amarillo=deploying).
+
 ## Arquitectura
 
 ```
