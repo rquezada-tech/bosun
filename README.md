@@ -16,6 +16,8 @@
 ![Paradigma](https://img.shields.io/badge/Paradigma-CLI_First-22c55e?style=flat-square&labelColor=374151)
 ![RAM](https://img.shields.io/badge/RAM-15MB_daemon-22c55e?style=flat-square&labelColor=374151)
 ![Stack](https://img.shields.io/badge/Stack-Rust_%2B_gRPC_%2B_SQLite-0ea5e9?style=flat-square&labelColor=374151)
+![MCP](https://img.shields.io/badge/MCP-LLM_Friendly-7c3aed?style=flat-square&labelColor=374151)
+![MultiCloud](https://img.shields.io/badge/MultiCloud-mTLS-f97316?style=flat-square&labelColor=374151)
 ![Licencia](https://img.shields.io/badge/Licencia-GPLv3+-2f855a?style=flat-square&labelColor=374151)
 
 </div>
@@ -78,13 +80,16 @@ Cache enabled for api  │  TTL: 60s  │  Strategy: disk
 | **CI/CD** | Webhooks (git push → redeploy automático) | ✅ |
 | **Dashboard** | TUI interactiva (`bosun dashboard`, ratatui) | ✅ |
 | **Instalación** | Un solo comando: `curl \| sudo bash` | ✅ |
+| **Multi-nodo** | Docker Swarm (services, overlay networks, rolling nativo) | ✅ |
+| **Multi-cloud** | Controller centralizado para múltiples VPS | ✅ |
+| **MCP Server** | 6 tools para que IAs administren el server sin SSH | ✅ |
 
 ### Próximos
 
-- [ ] Docker Swarm multi-node — deploy en clusters
 - [ ] One-click app store comunitario — compartir templates
 - [ ] Métricas históricas con retención configurable
 - [ ] Alertas (Slack, email, webhook) basadas en thresholds
+- [ ] Soporte para Kubernetes como backend alternativo
 
 ### No planeados (van contra la filosofía de ser ligero)
 
@@ -104,6 +109,12 @@ curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/in
 
 # Con seguridad automática:
 curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash -s -- --with-crowdsec
+
+# Como controller multi-cloud:
+curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash -s -- --as-controller
+
+# Con Docker Swarm:
+curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash -s -- --with-swarm
 ```
 
 Esto instala: Docker Engine + Caddy + bosun-daemon + systemd + TLS + firewall.
@@ -155,6 +166,23 @@ bosun gateway peer add nyc-vps 10.0.1.5:9090 --ca-cert /etc/bosun/ca.crt
 bosun gateway peer list        # ver todos los peers
 bosun gateway peer test nyc-vps  # probar conectividad TLS
 bosun gateway peer remove nyc-vps
+
+# Multi-Cloud Orchestration
+bosun cluster add-node vps-2 --addr 5.6.7.8:9090
+bosun cluster nodes            # tabla de nodos (CPU, RAM, apps)
+bosun deploy ./app --node vps-2  # desplegar en un nodo remoto
+bosun cluster metrics          # métricas agregadas de todo el cluster
+
+# MCP Server (IA administra el server)
+# Configurar Claude Desktop para conectarse a bosun MCP:
+# {
+#   "mcpServers": {
+#     "bosun": {
+#       "url": "https://mi-server:9092/mcp",
+#       "headers": { "X-API-Key": "tu-api-key" }
+#     }
+#   }
+# }
 
 # Dashboard
 bosun dashboard                # TUI interactiva con todo en vivo
@@ -274,6 +302,9 @@ establecer la cadena de confianza.
 | **API Gateway integrado** | ✅ APISIX | ❌          | ❌        | ❌          | ❌        |
 | **Seguridad automática**  | ✅ CrowdSec | ❌        | ❌        | ❌          | ❌        |
 | **Pentesting CLI**        | ✅        | ❌          | ❌        | ❌          | ❌        |
+| **MCP Server (LLM)**      | ✅        | ❌          | ❌        | ❌          | ❌        |
+| **Multi-cloud controller**| ✅        | ❌          | ❌        | ❌          | ❌        |
+| **Docker Swarm**          | ✅        | ✅          | ❌        | ❌          | ❌        |
 | **Auth multi-tenant**     | ✅ JWT    | ✅          | ❌        | ✅          | ❌        |
 | **Backup/Restore**        | ✅        | ✅          | ❌        | ✅          | ❌        |
 | **Instalación**           | `curl \| bash` | Script   | `apt-get` | `docker run` | Ruby gem |
@@ -301,7 +332,9 @@ bosun/
 │           ├── auth/        # JWT auth, interceptor, roles
 │           ├── backup/      # Backup/Restore de volúmenes
 │           ├── security/    # CrowdSec/Fail2Ban + pentesting
-│           ├── gateway/     # APISIX Admin API client
+│           ├── gateway/     # APISIX Admin API client + cross-VPS peers
+│           ├── mcp/         # MCP server (LLM-friendly tools)
+│           ├── cluster/     # Multi-cloud orchestration controller
 │           ├── metrics/     # Recolección de métricas Docker
 │           ├── health/      # Health checker + auto-restart
 │           ├── webhook/     # HTTP server para git push → redeploy
