@@ -1,0 +1,25 @@
+name = "ollama"
+description = "Ollama — run LLMs locally (Llama, Mistral, Qwen, Phi). Self-hosted AI inference server with OpenAI-compatible API."
+category = "ai-agent"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ollama.png"
+
+[[versions]]
+version = "latest"
+image = "ollama/ollama:latest"
+default = true
+
+[[versions]]
+version = "rocm"
+image = "ollama/ollama:rocm"
+
+[env]
+OLLAMA_KEEP_ALIVE = { description = "Keep model loaded in memory (e.g., 24h, -1 for indefinite)", default = "24h", required = false }
+OLLAMA_HOST = { description = "Bind address", default = "0.0.0.0", required = false }
+OLLAMA_NUM_PARALLEL = { description = "Max parallel requests", default = "4", required = false }
+OLLAMA_MAX_LOADED_MODELS = { description = "Max models loaded simultaneously", default = "2", required = false }
+
+[volumes]
+models = "/root/.ollama"
+
+[ports]
+main = 11434

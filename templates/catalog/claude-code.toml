@@ -1,0 +1,21 @@
+name = "claude-code"
+description = "Claude Code — Anthropic's official CLI agent for coding tasks. AI-powered development assistant with terminal access."
+category = "ai-agent"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/anthropic.png"
+
+[[versions]]
+version = "latest"
+image = "anthropics/claude-code:latest"
+default = true
+
+[env]
+ANTHROPIC_API_KEY = { description = "Anthropic API key", default = "", required = true }
+CLAUDE_CODE_MODEL = { description = "Model (claude-sonnet-4-20250514, claude-opus-4-20250514)", default = "claude-sonnet-4-20250514", required = false }
+CLAUDE_CODE_WORKDIR = { description = "Working directory for the agent", default = "/workspace", required = false }
+
+[volumes]
+workspace = "/workspace"
+claude-config = "/root/.claude"
+
+[ports]
+main = 8080

@@ -1,0 +1,24 @@
+name = "hermes-agent"
+description = "Hermes Agent — AI coding agent with file access, terminal, and browser tools. Self-hosted AI assistant for DevOps and development."
+category = "ai-agent"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/artificial-intelligence.png"
+
+[[versions]]
+version = "latest"
+image = "nousresearch/hermes-agent:latest"
+default = true
+
+[env]
+HERMES_MODEL_PROVIDER = { description = "LLM provider (openai, anthropic, openrouter, deepseek, groq)", default = "openai", required = true }
+HERMES_MODEL = { description = "Model name (e.g., gpt-4o, claude-sonnet-4-20250514)", default = "gpt-4o", required = true }
+HERMES_API_KEY = { description = "API key for the provider", default = "", required = true }
+HERMES_WORKDIR = { description = "Working directory inside container", default = "/workspace", required = false }
+HERMES_ENABLE_BROWSER = { description = "Enable browser tools (true/false)", default = "true", required = false }
+HERMES_ENABLE_COMPUTER_USE = { description = "Enable computer use tools (true/false)", default = "false", required = false }
+
+[volumes]
+workspace = "/workspace"
+hermes-config = "/root/.hermes"
+
+[ports]
+main = 8080

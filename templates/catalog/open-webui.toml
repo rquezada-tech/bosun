@@ -1,0 +1,22 @@
+name = "open-webui"
+description = "Open WebUI — self-hosted ChatGPT-like interface for local and remote LLMs. Works with Ollama, OpenAI, and any OpenAI-compatible API."
+category = "ai-agent"
+icon = "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/open-webui.png"
+
+[[versions]]
+version = "latest"
+image = "ghcr.io/open-webui/open-webui:main"
+default = true
+
+[env]
+OLLAMA_BASE_URL = { description = "Ollama server URL (leave empty for OpenAI mode)", default = "", required = false }
+OPENAI_API_KEY = { description = "OpenAI API key (if using cloud models)", default = "", required = false }
+WEBUI_SECRET_KEY = { description = "Secret key for session encryption", default = "", required = false }
+WEBUI_NAME = { description = "Display name for the WebUI instance", default = "Bosun AI", required = false }
+ENABLE_SIGNUP = { description = "Allow new user signups (true/false)", default = "false", required = false }
+
+[volumes]
+data = "/app/backend/data"
+
+[ports]
+main = 3000
