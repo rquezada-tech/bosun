@@ -54,6 +54,8 @@ message DeployRequest {
     map<string, string> env = 4;
     optional uint32 port = 5;
     DeployStrategy strategy = 6;
+    repeated string pre_hooks = 7;   // shell commands to run before build
+    repeated string post_hooks = 8;  // shell commands to run after deploy + health check
 }
 
 message DeployResponse {
@@ -106,6 +108,31 @@ message DeleteUserRequest {
 
 message DeleteUserResponse {}
 
+// --- Security messages ---
+
+message SecurityStatus {
+    string engine = 1;
+    uint64 attacks_blocked = 2;
+    uint64 active_bans = 3;
+}
+
+message SecurityDecision {
+    string ip = 1;
+    string reason = 2;
+    string action = 3;
+    uint64 expires_unix = 4;
+}
+
+message GetSecurityStatusRequest {}
+message GetSecurityStatusResponse {
+    SecurityStatus status = 1;
+}
+
+message GetSecurityDecisionsRequest {}
+message GetSecurityDecisionsResponse {
+    repeated SecurityDecision decisions = 1;
+}
+
 // --- Services ---
 
 service Bosun {
@@ -141,6 +168,19 @@ service Bosun {
     rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
     rpc ListBackups(ListBackupsRequest) returns (ListBackupsResponse);
     rpc RestoreBackup(RestoreBackupRequest) returns (RestoreBackupResponse);
+
+    // Security
+    rpc GetSecurityStatus(GetSecurityStatusRequest) returns (GetSecurityStatusResponse);
+    rpc GetSecurityDecisions(GetSecurityDecisionsRequest) returns (GetSecurityDecisionsResponse);
+
+    // Gateway (APISIX)
+    rpc GetGatewayStatus(GetGatewayStatusRequest) returns (GetGatewayStatusResponse);
+    rpc ListGatewayRoutes(ListGatewayRoutesRequest) returns (ListGatewayRoutesResponse);
+    rpc EnableGatewayPlugin(EnableGatewayPluginRequest) returns (EnableGatewayPluginResponse);
+    rpc DisableGatewayPlugin(DisableGatewayPluginRequest) returns (DisableGatewayPluginResponse);
+    rpc GetGatewayCacheStats(GetGatewayCacheStatsRequest) returns (GetGatewayCacheStatsResponse);
+    rpc PurgeGatewayCache(PurgeGatewayCacheRequest) returns (PurgeGatewayCacheResponse);
+    rpc GetGatewayMetrics(GetGatewayMetricsRequest) returns (GetGatewayMetricsResponse);
 }
 
 // --- Request / Response messages ---
@@ -254,4 +294,69 @@ message ListTemplatesRequest {}
 
 message ListTemplatesResponse {
     repeated TemplateInfo templates = 1;
+}
+
+// --- Gateway (APISIX) messages ---
+
+message GatewayStatus {
+    bool enabled = 1;
+    string version = 2;
+    string uptime = 3;
+}
+
+message GatewayRoute {
+    string name = 1;
+    string domain = 2;
+    uint32 port = 3;
+    repeated string plugins = 4;
+    string uri = 5;
+}
+
+message GatewayCacheStats {
+    string app_name = 1;
+    uint64 hits = 2;
+    uint64 misses = 3;
+    uint64 size_bytes = 4;
+}
+
+message GetGatewayStatusRequest {}
+message GetGatewayStatusResponse {
+    GatewayStatus status = 1;
+}
+
+message ListGatewayRoutesRequest {}
+message ListGatewayRoutesResponse {
+    repeated GatewayRoute routes = 1;
+}
+
+message EnableGatewayPluginRequest {
+    string app_name = 1;
+    string plugin_name = 2;
+    // JSON config string for the plugin
+    string config_json = 3;
+}
+message EnableGatewayPluginResponse {}
+
+message DisableGatewayPluginRequest {
+    string app_name = 1;
+    string plugin_name = 2;
+}
+message DisableGatewayPluginResponse {}
+
+message GetGatewayCacheStatsRequest {
+    string app_name = 1;
+}
+message GetGatewayCacheStatsResponse {
+    GatewayCacheStats stats = 1;
+}
+
+message PurgeGatewayCacheRequest {
+    string app_name = 1;
+}
+message PurgeGatewayCacheResponse {}
+
+message GetGatewayMetricsRequest {}
+message GetGatewayMetricsResponse {
+    // Raw Prometheus metrics text
+    string metrics_text = 1;
 }

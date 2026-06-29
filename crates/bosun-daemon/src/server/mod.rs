@@ -20,6 +20,8 @@ pub struct BosunService {
     pub metrics: Arc<crate::metrics::MetricCollector>,
     pub store: Arc<crate::persist::Store>,
     pub proxy: Option<Arc<crate::proxy::CaddyClient>>,
+    /// APISIX API Gateway client (optional — None if gateway is not running).
+    pub gateway: Option<crate::gateway::GatewayClient>,
     /// Shared restart-count map populated by the health checker.
     pub restart_counts: crate::health::RestartCounts,
     /// Auth service for user management and token validation.
@@ -28,6 +30,8 @@ pub struct BosunService {
     pub catalog: Arc<crate::templates::Catalog>,
     /// Backup and restore service.
     pub backup: Arc<crate::backup::BackupService>,
+    /// Security engine (CrowdSec/Fail2Ban) for IDS/IPS monitoring.
+    pub security: crate::security::SecurityService,
 }
 
 impl BosunService {
@@ -36,20 +40,24 @@ impl BosunService {
         metrics: crate::metrics::MetricCollector,
         store: Arc<crate::persist::Store>,
         proxy: Option<crate::proxy::CaddyClient>,
+        gateway: Option<crate::gateway::GatewayClient>,
         restart_counts: crate::health::RestartCounts,
         auth_service: Arc<crate::auth::AuthService>,
         catalog: Arc<crate::templates::Catalog>,
         backup: crate::backup::BackupService,
+        security: crate::security::SecurityService,
     ) -> Self {
         Self {
             docker,
             metrics: Arc::new(metrics),
             store,
             proxy: proxy.map(Arc::new),
+            gateway,
             restart_counts,
             auth_service,
             catalog,
             backup: Arc::new(backup),
+            security,
         }
     }
 }
@@ -274,6 +282,22 @@ impl Bosun for BosunService {
         let domain = req.domain.as_deref();
         let enable_ssl = req.enable_ssl;
 
+        // Extract hooks from request + auto-detected bosun.hooks.toml
+        let context_dir = std::path::Path::new(&req.context_path);
+        let mut pre_hooks: Vec<String> = req.pre_hooks.clone();
+        let mut post_hooks: Vec<String> = req.post_hooks.clone();
+
+        if let Some(hooks_config) = crate::hooks::load_hooks_from_dir(context_dir)
+            .map_err(|e| Status::internal(format!("Failed to load bosun.hooks.toml: {e}")))?
+        {
+            if let Some(pre_section) = hooks_config.pre_deploy {
+                pre_hooks.extend(pre_section.commands);
+            }
+            if let Some(post_section) = hooks_config.post_deploy {
+                post_hooks.extend(post_section.commands);
+            }
+        }
+
         // Map proto DeployStrategy enum (i32) to crate deploy strategy
         // 0 = DIRECT (default), 1 = ROLLING, 2 = BLUE_GREEN
         let strategy = match req.strategy {
@@ -283,10 +307,21 @@ impl Bosun for BosunService {
         };
 
         tracing::info!(
-            "Deploy request: strategy={:?}, created_by='{}'",
+            "Deploy request: strategy={:?}, created_by='{}', pre_hooks={}, post_hooks={}",
             strategy,
-            created_by
+            created_by,
+            pre_hooks.len(),
+            post_hooks.len()
         );
+
+        // Run pre-deploy hooks on the host before build
+        let env_vars_for_hooks: std::collections::HashMap<String, String> = req.env.clone();
+        crate::hooks::run_hooks(&pre_hooks, context_dir, &env_vars_for_hooks)
+            .await
+            .map_err(|e| {
+                tracing::error!("Pre-deploy hooks failed: {e}");
+                Status::internal(format!("Pre-deploy hooks failed: {e}"))
+            })?;
 
         // Validate SSL flag: requires a domain for Let's Encrypt via Caddy
         if enable_ssl {
@@ -370,6 +405,17 @@ impl Bosun for BosunService {
                 }
             }
 
+            // Run post-deploy hooks after deploy + health check
+            crate::hooks::run_hooks(&post_hooks, context_dir, &env_vars)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Post-deploy hooks failed: {e}");
+                    Status::internal(format!("Post-deploy hooks failed: {e}"))
+                })?;
+
+            // Configure security monitoring for this app
+            self.security.configure_app(&app_name, domain);
+
             return Ok(Response::new(DeployResponse {
                 app_name,
                 status: "deployed".to_string(),
@@ -401,13 +447,24 @@ impl Bosun for BosunService {
             &env_vars,
         )
         .await
-        .map_err(|e| Status::internal(format!("Deploy failed: {}", e)))?;
+        .map_err(|e| Status::internal(format!("Deploy failed: {e}")))?;
 
         // Track created-by via docker labels
         tracing::debug!("App '{}' created by '{}' (non-template deploy)", app_name, created_by);
 
         // Persist app metadata and env vars
         let _ = self.store.upsert_app(&app_name, domain, Some(port as u32), &env_vars);
+
+        // Run post-deploy hooks after deploy + health check
+        crate::hooks::run_hooks(&post_hooks, context_dir, &env_vars)
+            .await
+            .map_err(|e| {
+                tracing::error!("Post-deploy hooks failed: {e}");
+                Status::internal(format!("Post-deploy hooks failed: {e}"))
+            })?;
+
+        // Configure security monitoring for this app
+        self.security.configure_app(&app_name, domain);
 
         Ok(Response::new(DeployResponse {
             app_name,
@@ -660,6 +717,225 @@ impl Bosun for BosunService {
         Ok(Response::new(RestoreBackupResponse {
             app_name,
             status,
+        }))
+    }
+
+    // ── Gateway (APISIX) ────────────────────────────────────────────
+
+    async fn get_gateway_status(
+        &self,
+        _request: Request<GetGatewayStatusRequest>,
+    ) -> Result<Response<GetGatewayStatusResponse>, Status> {
+        tracing::info!("get_gateway_status called");
+
+        let status = match &self.gateway {
+            Some(gw) => {
+                match gw.get_status().await {
+                    Ok(info) => GatewayStatus {
+                        enabled: info.enabled,
+                        version: info.version,
+                        uptime: info.uptime,
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to get gateway status: {e}");
+                        GatewayStatus {
+                            enabled: false,
+                            version: format!("error: {e}"),
+                            uptime: String::new(),
+                        }
+                    }
+                }
+            }
+            None => GatewayStatus {
+                enabled: false,
+                version: "APISIX not configured".to_string(),
+                uptime: String::new(),
+            },
+        };
+
+        Ok(Response::new(GetGatewayStatusResponse {
+            status: Some(status),
+        }))
+    }
+
+    async fn list_gateway_routes(
+        &self,
+        _request: Request<ListGatewayRoutesRequest>,
+    ) -> Result<Response<ListGatewayRoutesResponse>, Status> {
+        tracing::info!("list_gateway_routes called");
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        let routes = gateway
+            .list_routes()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to list gateway routes: {e}")))?;
+
+        let proto_routes: Vec<GatewayRoute> = routes
+            .into_iter()
+            .map(|r| GatewayRoute {
+                name: r.name,
+                domain: r.domain,
+                port: r.port,
+                plugins: r.plugins,
+                uri: r.uri,
+            })
+            .collect();
+
+        Ok(Response::new(ListGatewayRoutesResponse {
+            routes: proto_routes,
+        }))
+    }
+
+    async fn enable_gateway_plugin(
+        &self,
+        request: Request<EnableGatewayPluginRequest>,
+    ) -> Result<Response<EnableGatewayPluginResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!(
+            "enable_gateway_plugin: app={}, plugin={}",
+            req.app_name,
+            req.plugin_name
+        );
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        gateway
+            .enable_plugin(&req.app_name, &req.plugin_name, &req.config_json)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to enable plugin: {e}")))?;
+
+        Ok(Response::new(EnableGatewayPluginResponse {}))
+    }
+
+    async fn disable_gateway_plugin(
+        &self,
+        request: Request<DisableGatewayPluginRequest>,
+    ) -> Result<Response<DisableGatewayPluginResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!(
+            "disable_gateway_plugin: app={}, plugin={}",
+            req.app_name,
+            req.plugin_name
+        );
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        gateway
+            .disable_plugin(&req.app_name, &req.plugin_name)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to disable plugin: {e}")))?;
+
+        Ok(Response::new(DisableGatewayPluginResponse {}))
+    }
+
+    async fn get_gateway_cache_stats(
+        &self,
+        request: Request<GetGatewayCacheStatsRequest>,
+    ) -> Result<Response<GetGatewayCacheStatsResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("get_gateway_cache_stats: app={}", req.app_name);
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        let stats = gateway
+            .get_cache_stats(&req.app_name)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get cache stats: {e}")))?;
+
+        Ok(Response::new(GetGatewayCacheStatsResponse {
+            stats: Some(GatewayCacheStats {
+                app_name: stats.app_name,
+                hits: stats.hits,
+                misses: stats.misses,
+                size_bytes: stats.size_bytes,
+            }),
+        }))
+    }
+
+    async fn purge_gateway_cache(
+        &self,
+        request: Request<PurgeGatewayCacheRequest>,
+    ) -> Result<Response<PurgeGatewayCacheResponse>, Status> {
+        let req = request.into_inner();
+        tracing::info!("purge_gateway_cache: app={}", req.app_name);
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        // Purge cache by disabling and re-enabling proxy-cache plugin
+        gateway
+            .disable_cache(&req.app_name)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to purge cache: {e}")))?;
+
+        Ok(Response::new(PurgeGatewayCacheResponse {}))
+    }
+
+    async fn get_gateway_metrics(
+        &self,
+        _request: Request<GetGatewayMetricsRequest>,
+    ) -> Result<Response<GetGatewayMetricsResponse>, Status> {
+        tracing::info!("get_gateway_metrics called");
+
+        let gateway = self.gateway.as_ref().ok_or_else(|| {
+            Status::unavailable("APISIX gateway is not configured. Run APISIX via Docker to enable.")
+        })?;
+
+        let metrics_text = gateway
+            .get_metrics()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get gateway metrics: {e}")))?;
+
+        Ok(Response::new(GetGatewayMetricsResponse { metrics_text }))
+    }
+
+    // ── Security RPCs ─────────────────────────────────────────────
+
+    async fn get_security_status(
+        &self,
+        _request: Request<GetSecurityStatusRequest>,
+    ) -> Result<Response<GetSecurityStatusResponse>, Status> {
+        tracing::info!("get_security_status called");
+
+        let stats = self.security.status();
+
+        Ok(Response::new(GetSecurityStatusResponse {
+            status: Some(SecurityStatus {
+                engine: stats.engine.as_str().to_string(),
+                attacks_blocked: stats.attacks_blocked,
+                active_bans: stats.active_bans,
+            }),
+        }))
+    }
+
+    async fn get_security_decisions(
+        &self,
+        _request: Request<GetSecurityDecisionsRequest>,
+    ) -> Result<Response<GetSecurityDecisionsResponse>, Status> {
+        tracing::info!("get_security_decisions called");
+
+        let decisions = self.security.decisions();
+
+        Ok(Response::new(GetSecurityDecisionsResponse {
+            decisions: decisions
+                .into_iter()
+                .map(|d| SecurityDecision {
+                    ip: d.ip,
+                    reason: d.reason,
+                    action: d.action,
+                    expires_unix: d.expires_unix,
+                })
+                .collect(),
         }))
     }
 }

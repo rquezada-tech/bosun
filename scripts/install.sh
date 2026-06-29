@@ -39,6 +39,9 @@ BOSUN_CACHE_DIR="${BOSUN_CACHE_DIR:-/var/cache/bosun}"
 BOSUN_LISTEN_ADDR="${BOSUN_LISTEN_ADDR:-0.0.0.0:9090}"
 BOSUN_WEBHOOK_LISTEN="${BOSUN_WEBHOOK_LISTEN:-0.0.0.0:9091}"
 BOSUN_RUST_LOG="${BOSUN_RUST_LOG:-bosun_daemon=info}"
+WITH_GATEWAY="${WITH_GATEWAY:-false}"  # Set to true to install APISIX API Gateway
+WITH_CROWDSEC="${WITH_CROWDSEC:-false}"  # Set to true to install CrowdSec IDS/IPS
+# If WITH_CROWDSEC is not set, install fail2ban as lightweight fallback
 
 CERT_FILE="${BOSUN_CONFIG_DIR}/server.crt"
 KEY_FILE="${BOSUN_CONFIG_DIR}/server.key"
@@ -164,8 +167,89 @@ else
     info "Caddy installed successfully."
 fi
 
-# ── Step 4: Install Rust toolchain ────────────────────────────────────────────
-header "Step 4/13: Installing Rust toolchain"
+# ── Step 4: Install APISIX API Gateway (optional, with --with-gateway) ───────
+header "Step 4/14: APISIX API Gateway (optional)"
+
+if [ "$WITH_GATEWAY" = "true" ]; then
+    info "APISIX API Gateway requested. Installing via Docker..."
+
+    # Check if bosun Docker network exists, create if not
+    if ! docker network inspect bosun &>/dev/null 2>&1; then
+        info "Creating bosun Docker network..."
+        docker network create bosun
+    fi
+
+    # Check if APISIX is already running
+    if docker ps --format '{{.Names}}' | grep -q '^apisix$'; then
+        info "APISIX container is already running."
+        APISIX_VERSION="$(docker inspect apisix --format '{{.Config.Image}}' 2>/dev/null || echo 'unknown')"
+        info "  Image: $APISIX_VERSION"
+    else
+        # Remove stopped container if it exists
+        docker rm -f apisix &>/dev/null || true
+
+        info "Starting APISIX container..."
+        docker run -d \
+            --name apisix \
+            --network bosun \
+            --restart unless-stopped \
+            -p 9080:9080 \
+            -p 9180:9180 \
+            -e APISIX_STAND_ALONE=true \
+            apache/apisix:latest
+
+        # Wait for APISIX to become healthy
+        info "Waiting for APISIX to start..."
+        for i in $(seq 1 30); do
+            if curl -s http://localhost:9180/apisix/admin/routes > /dev/null 2>&1; then
+                info "APISIX is ready (Admin API on port 9180, Proxy on port 9080)"
+                break
+            fi
+            sleep 2
+        done
+    fi
+
+    # Create a systemd unit for the APISIX container (ensures it starts on boot)
+    APISIX_SERVICE_FILE="/etc/systemd/system/apisix.service"
+    if [ ! -f "$APISIX_SERVICE_FILE" ]; then
+        info "Creating systemd unit for APISIX container..."
+        cat > "$APISIX_SERVICE_FILE" << 'SYSTEMDEOF'
+[Unit]
+Description=APISIX API Gateway (Docker)
+Documentation=https://apisix.apache.org/docs/
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+ExecStartPre=-/usr/bin/docker rm -f apisix
+ExecStart=/usr/bin/docker run --rm --name apisix \
+    --network bosun \
+    -p 9080:9080 \
+    -p 9180:9180 \
+    -e APISIX_STAND_ALONE=true \
+    apache/apisix:latest
+ExecStop=/usr/bin/docker stop apisix
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMDEOF
+        systemctl daemon-reload
+        systemctl enable apisix.service
+        info "APISIX systemd service created and enabled."
+    fi
+else
+    info "APISIX API Gateway not requested. Skipping."
+    info "  To enable later: re-run with WITH_GATEWAY=true or:"
+    info "    docker run -d --name apisix --network bosun \\"
+    info "      -p 9080:9080 -p 9180:9180 -e APISIX_STAND_ALONE=true apache/apisix:latest"
+fi
+
+# ── Step 5: Install Rust toolchain ────────────────────────────────────────────
+header "Step 5/14: Installing Rust toolchain"
 
 if command -v cargo &>/dev/null && rustup --version &>/dev/null 2>&1; then
     info "Rust toolchain is already installed."
@@ -192,8 +276,8 @@ if ! command -v cargo &>/dev/null; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# ── Step 5: Clone / update bosun repo ─────────────────────────────────────────
-header "Step 5/13: Fetching bosun source"
+# ── Step 6: Clone / update bosun repo ─────────────────────────────────────────
+header "Step 6/14: Fetching bosun source"
 
 if [ -d "$BUILD_DIR/.git" ] && git -C "$BUILD_DIR" remote get-url origin &>/dev/null 2>&1; then
     info "Updating existing clone..."
@@ -210,8 +294,8 @@ else
     }
 fi
 
-# ── Step 6: Build bosun-daemon ────────────────────────────────────────────────
-header "Step 6/13: Building bosun-daemon (release)"
+# ── Step 7: Build bosun-daemon ────────────────────────────────────────────────
+header "Step 7/14: Building bosun-daemon (release)"
 
 cd "$BUILD_DIR"
 
@@ -227,8 +311,8 @@ fi
 install -m 0755 "$BUILD_DIR/target/release/bosun-daemon" "$BOSUN_BIN_DIR/bosun-daemon"
 info "Installed bosun-daemon to $BOSUN_BIN_DIR/bosun-daemon"
 
-# ── Step 7: Create /etc/bosun/ directory and install catalog ──────────────────
-header "Step 7/13: Setting up configuration directory and app catalog"
+# ── Step 8: Create /etc/bosun/ directory and install catalog ──────────────────
+header "Step 8/14: Setting up configuration directory and app catalog"
 
 mkdir -p "$BOSUN_CONFIG_DIR"
 chmod 0750 "$BOSUN_CONFIG_DIR"
@@ -246,8 +330,8 @@ else
     warn "Template catalog not found at $CATALOG_SRC. Templates will be unavailable."
 fi
 
-# ── Step 8: Generate self-signed TLS cert (if no certs provided) ──────────────
-header "Step 8/13: Setting up TLS certificates"
+# ── Step 9: Generate self-signed TLS cert (if no certs provided) ──────────────
+header "Step 9/14: Setting up TLS certificates"
 
 if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
     info "TLS certificates already present:"
@@ -293,8 +377,8 @@ if [ "${FORCE_REGENERATE:-false}" = "true" ]; then
     warn "  $KEY_FILE"
 fi
 
-# ── Step 9: Generate webhook secret ────────────────────────────────────────────
-header "Step 9/13: Generating webhook secret"
+# ── Step 10: Generate webhook secret ────────────────────────────────────────────
+header "Step 10/14: Generating webhook secret"
 
 if [ -f "$WEBHOOK_SECRET_FILE" ]; then
     info "Webhook secret already exists at $WEBHOOK_SECRET_FILE"
@@ -306,8 +390,8 @@ else
     info "Webhook secret generated and saved to $WEBHOOK_SECRET_FILE"
 fi
 
-# ── Step 10: Generate JWT secret and admin password ──────────────────────────
-header "Step 10/13: Generating JWT authentication secret"
+# ── Step 11: Generate JWT secret and admin password ──────────────────────────
+header "Step 11/14: Generating JWT authentication secret"
 
 if [ -f "$JWT_SECRET_FILE" ]; then
     info "JWT secret already exists at $JWT_SECRET_FILE"
@@ -327,8 +411,8 @@ else
     ADMIN_PASSWORD_GENERATED="false"
 fi
 
-# ── Step 11: Create systemd service ────────────────────────────────────────────
-header "Step 11/13: Creating systemd service"
+# ── Step 12: Create systemd service ────────────────────────────────────────────
+header "Step 12/14: Creating systemd service"
 
 # Create bosun system user if it doesn't exist
 if ! id -u "$BOSUN_USER" &>/dev/null; then
@@ -357,8 +441,8 @@ cat > "$SERVICE_FILE" << SYSTEMDEOF
 [Unit]
 Description=Bosun PaaS Daemon
 Documentation=https://github.com/rquezada-tech/bosun
-After=network-online.target docker.service
-Wants=network-online.target docker.service
+After=network-online.target docker.service${WITH_GATEWAY:+ apisix.service}
+Wants=network-online.target docker.service${WITH_GATEWAY:+ apisix.service}
 Requires=docker.service
 
 [Service]
@@ -384,7 +468,7 @@ ProtectSystem=strict
 ProtectHome=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
-ReadWritePaths=${BOSUN_DATA_DIR} ${BOSUN_CACHE_DIR} ${BOSUN_CONFIG_DIR}
+ReadWritePaths=${BOSUN_DATA_DIR} ${BOSUN_CACHE_DIR} ${BOSUN_CONFIG_DIR} /var/log/caddy
 ReadOnlyPaths=/etc/ssl/certs
 
 # Limits
@@ -400,8 +484,8 @@ chmod 0644 "$SERVICE_FILE"
 # Reload systemd
 systemctl daemon-reload
 
-# ── Step 12: Enable and start the service ──────────────────────────────────────
-header "Step 12/13: Enabling and starting bosun-daemon"
+# ── Step 13: Enable and start the service ──────────────────────────────────────
+header "Step 13/14: Enabling and starting bosun-daemon"
 
 systemctl enable bosun-daemon.service
 
@@ -423,8 +507,97 @@ else
     warn "Check logs: journalctl -u bosun-daemon -f"
 fi
 
-# ── Step 13: Open firewall port ───────────────────────────────────────────────
-header "Step 13/13: Configuring firewall"
+# ── Step 14: Install IDS/IPS (CrowdSec or Fail2Ban) ──────────────────────────
+header "Step 14/15: Installing IDS/IPS security engine"
+
+if [ "$WITH_CROWDSEC" = "true" ]; then
+    info "CrowdSec requested via --with-crowdsec"
+    if command -v cscli &>/dev/null; then
+        info "CrowdSec is already installed."
+        CS_VERSION="$(cscli version 2>/dev/null || echo 'unknown')"
+        info "  Version: $CS_VERSION"
+    else
+        info "Installing CrowdSec from official repository..."
+
+        # Add CrowdSec repository
+        curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+
+        # Install CrowdSec + firewall bouncer
+        apt-get install -y -qq crowdsec crowdsec-firewall-bouncer-iptables
+
+        # Enable and start CrowdSec
+        systemctl enable crowdsec.service
+        systemctl start crowdsec.service
+
+        # Configure CrowdSec to read Caddy logs
+        CROWD_SEC_ACQUIS_DIR="/etc/crowdsec/acquis.d"
+        mkdir -p "$CROWD_SEC_ACQUIS_DIR"
+
+        cat > "$CROWD_SEC_ACQUIS_DIR/caddy.yaml" << 'CROWDSECEOF'
+# Bosun-managed: CrowdSec reads Caddy logs
+filenames:
+  - /var/log/caddy/*.log
+labels:
+  type: caddy
+  bosun_managed: "true"
+CROWDSECEOF
+
+        # Reload CrowdSec
+        cscli hub update 2>/dev/null || true
+        cscli hub upgrade 2>/dev/null || true
+        systemctl reload crowdsec 2>/dev/null || systemctl restart crowdsec
+
+        info "CrowdSec installed and configured to monitor Caddy logs."
+    fi
+else
+    info "CrowdSec not requested. Installing Fail2Ban as lightweight fallback..."
+    if command -v fail2ban-client &>/dev/null; then
+        info "Fail2Ban is already installed."
+        F2B_VERSION="$(fail2ban-client version 2>/dev/null || echo 'unknown')"
+        info "  Version: $F2B_VERSION"
+    else
+        apt-get install -y -qq fail2ban
+
+        # Enable and start Fail2Ban
+        systemctl enable fail2ban.service
+        systemctl start fail2ban.service
+
+        # Create a default jail for Caddy HTTP auth failures
+        F2B_JAIL_DIR="/etc/fail2ban/jail.d"
+        mkdir -p "$F2B_JAIL_DIR"
+
+        cat > "$F2B_JAIL_DIR/bosun-caddy.conf" << 'FAIL2BANEOF'
+# Bosun-managed: Fail2Ban monitors Caddy access logs
+[bosun-caddy]
+enabled = true
+filter = bosun-caddy
+logpath = /var/log/caddy/access.log
+          /var/log/caddy/*.log
+maxretry = 5
+findtime = 600
+bantime = 3600
+action = iptables-multiport[name=bosun-caddy, port="80,443", protocol=tcp]
+FAIL2BANEOF
+
+        # Create filter for HTTP auth failures
+        cat > "/etc/fail2ban/filter.d/bosun-caddy.conf" << 'FAIL2BANFILTEREOF'
+# Bosun-managed Fail2Ban filter for Caddy
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS).*" (401|403|429) .*$
+ignoreregex =
+FAIL2BANFILTEREOF
+
+        # Reload Fail2Ban
+        systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban
+
+        info "Fail2Ban installed and configured to monitor Caddy logs."
+    fi
+fi
+
+info "Security engine ready — bosun-daemon will auto-detect and configure per-app."
+
+# ── Step 15: Open firewall port ───────────────────────────────────────────────
+header "Step 15/15: Configuring firewall"
 
 BOSUN_PORT="${BOSUN_LISTEN_ADDR##*:}"
 WEBHOOK_PORT="${BOSUN_WEBHOOK_LISTEN##*:}"

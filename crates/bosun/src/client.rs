@@ -236,6 +236,8 @@ impl BosunClient {
         env: std::collections::HashMap<String, String>,
         port: Option<u32>,
         strategy: DeployStrategy,
+        pre_hooks: &[String],
+        post_hooks: &[String],
     ) -> anyhow::Result<DeployResponse> {
         let request = self.auth_request(tonic::Request::new(DeployRequest {
             context_path: context_path.to_string(),
@@ -244,6 +246,8 @@ impl BosunClient {
             env,
             port,
             strategy: strategy.into(),
+            pre_hooks: pre_hooks.to_vec(),
+            post_hooks: post_hooks.to_vec(),
         }));
         let response = self
             .inner
@@ -412,6 +416,152 @@ impl BosunClient {
             .restore_backup(request)
             .await
             .context(format!("gRPC RestoreBackup failed for '{backup_id}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    // ── Gateway (APISIX) ──────────────────────────────────────────────
+
+    /// Get gateway status (enabled, version, uptime).
+    pub async fn get_gateway_status(
+        &mut self,
+    ) -> anyhow::Result<GetGatewayStatusResponse> {
+        let request = self.auth_request(tonic::Request::new(GetGatewayStatusRequest {}));
+        let response = self
+            .inner
+            .get_gateway_status(request)
+            .await
+            .context("gRPC GetGatewayStatus failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// List all APISIX routes managed by bosun.
+    pub async fn list_gateway_routes(
+        &mut self,
+    ) -> anyhow::Result<ListGatewayRoutesResponse> {
+        let request = self.auth_request(tonic::Request::new(ListGatewayRoutesRequest {}));
+        let response = self
+            .inner
+            .list_gateway_routes(request)
+            .await
+            .context("gRPC ListGatewayRoutes failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Enable a plugin on a gateway route.
+    pub async fn enable_gateway_plugin(
+        &mut self,
+        app_name: &str,
+        plugin_name: &str,
+        config_json: &str,
+    ) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(EnableGatewayPluginRequest {
+            app_name: app_name.to_string(),
+            plugin_name: plugin_name.to_string(),
+            config_json: config_json.to_string(),
+        }));
+        self.inner
+            .enable_gateway_plugin(request)
+            .await
+            .context(format!(
+                "gRPC EnableGatewayPlugin failed for '{app_name}': plugin={plugin_name}"
+            ))?;
+        Ok(())
+    }
+
+    /// Disable a plugin on a gateway route.
+    pub async fn disable_gateway_plugin(
+        &mut self,
+        app_name: &str,
+        plugin_name: &str,
+    ) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(DisableGatewayPluginRequest {
+            app_name: app_name.to_string(),
+            plugin_name: plugin_name.to_string(),
+        }));
+        self.inner
+            .disable_gateway_plugin(request)
+            .await
+            .context(format!(
+                "gRPC DisableGatewayPlugin failed for '{app_name}': plugin={plugin_name}"
+            ))?;
+        Ok(())
+    }
+
+    /// Get cache statistics for a gateway route.
+    pub async fn get_gateway_cache_stats(
+        &mut self,
+        app_name: &str,
+    ) -> anyhow::Result<GetGatewayCacheStatsResponse> {
+        let request = self.auth_request(tonic::Request::new(GetGatewayCacheStatsRequest {
+            app_name: app_name.to_string(),
+        }));
+        let response = self
+            .inner
+            .get_gateway_cache_stats(request)
+            .await
+            .context(format!("gRPC GetGatewayCacheStats failed for '{app_name}'"))?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Purge the cache for a gateway route.
+    pub async fn purge_gateway_cache(
+        &mut self,
+        app_name: &str,
+    ) -> anyhow::Result<()> {
+        let request = self.auth_request(tonic::Request::new(PurgeGatewayCacheRequest {
+            app_name: app_name.to_string(),
+        }));
+        self.inner
+            .purge_gateway_cache(request)
+            .await
+            .context(format!("gRPC PurgeGatewayCache failed for '{app_name}'"))?;
+        Ok(())
+    }
+
+    /// Get Prometheus metrics from APISIX.
+    pub async fn get_gateway_metrics(
+        &mut self,
+    ) -> anyhow::Result<GetGatewayMetricsResponse> {
+        let request = self.auth_request(tonic::Request::new(GetGatewayMetricsRequest {}));
+        let response = self
+            .inner
+            .get_gateway_metrics(request)
+            .await
+            .context("gRPC GetGatewayMetrics failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    // ── Security ──────────────────────────────────────────────────
+
+    /// Get security engine status.
+    pub async fn get_security_status(
+        &mut self,
+    ) -> anyhow::Result<GetSecurityStatusResponse> {
+        let request = self.auth_request(tonic::Request::new(GetSecurityStatusRequest {}));
+        let response = self
+            .inner
+            .get_security_status(request)
+            .await
+            .context("gRPC GetSecurityStatus failed")?
+            .into_inner();
+        Ok(response)
+    }
+
+    /// Get list of active security decisions (banned IPs).
+    pub async fn get_security_decisions(
+        &mut self,
+    ) -> anyhow::Result<GetSecurityDecisionsResponse> {
+        let request = self.auth_request(tonic::Request::new(GetSecurityDecisionsRequest {}));
+        let response = self
+            .inner
+            .get_security_decisions(request)
+            .await
+            .context("gRPC GetSecurityDecisions failed")?
             .into_inner();
         Ok(response)
     }

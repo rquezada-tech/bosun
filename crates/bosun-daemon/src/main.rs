@@ -21,11 +21,14 @@ mod server;
 mod docker;
 mod deploy;
 mod health;
+mod hooks;
 mod metrics;
 mod proxy;
 mod persist;
 mod templates;
 mod webhook;
+mod security;
+mod gateway;
 
 /// Bosun daemon arguments.
 #[derive(Parser)]
@@ -177,15 +180,37 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Connect to APISIX API Gateway (optional)
+    let gateway = gateway::GatewayClient::connect().await;
+    match &gateway {
+        Some(_) => {
+            tracing::info!("APISIX API Gateway integration enabled");
+        }
+        None => {
+            tracing::warn!(
+                "APISIX Admin API unreachable at http://localhost:9180/apisix/admin. \
+                 Gateway features (rate-limit, caching, JWT auth) disabled. \
+                 Run APISIX via Docker to enable: docker run -d --name apisix \
+                 --network bosun -p 9080:9080 -p 9180:9180 apache/apisix"
+            );
+        }
+    }
+
+    // Initialize security (CrowdSec or Fail2Ban auto-detect)
+    let security = security::SecurityService::detect();
+    tracing::info!("Security engine: {}", security.engine().as_str());
+
     let bosun_service = server::BosunService::new(
         docker_arc,
         metrics,
         store,
         proxy,
+        gateway,
         restart_counts,
         auth_service.clone(),
         catalog,
         backup_service,
+        security,
     );
 
     // Build the gRPC server with auth interceptor

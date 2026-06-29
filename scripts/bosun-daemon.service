@@ -28,7 +28,7 @@ ProtectSystem=strict
 ProtectHome=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/bosun /var/cache/bosun /etc/bosun
+ReadWritePaths=/var/lib/bosun /var/cache/bosun /etc/bosun /var/log/caddy
 ReadOnlyPaths=/etc/ssl/certs
 
 # Limits

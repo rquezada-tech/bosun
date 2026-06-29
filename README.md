@@ -1,368 +1,315 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://img.shields.io/badge/bosun-⚓-3BB1DC?style=for-the-badge">
-    <img alt="bosun" src="https://img.shields.io/badge/bosun-⚓-3BB1DC?style=for-the-badge">
-  </picture>
-</p>
+# Bosun
+
+> 🌐 **English version:** [README.en.md](./README.en.md) — [View this README in English](./README.en.md)
 
 <p align="center">
-  <strong>Minimal PaaS orchestration. Zero dashboard. Pure terminal.</strong>
+  <img src="https://img.shields.io/badge/bosun-⚓_Minimal_PaaS-3BB1DC?style=for-the-badge&logo=docker&logoColor=white&labelColor=2B2B2B&fontSize=24" alt="Bosun Logo" width="480">
 </p>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3+-blue.svg" alt="License: GPLv3+"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-stable%201.95+-orange.svg" alt="Rust: stable 1.95+"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/status-alpha-red.svg" alt="Status: Alpha"></a>
-</p>
+> *Deploy Docker apps, monitor metrics, and manage SSL — all from your terminal. Zero dashboard. Pure CLI.*
 
----
+<!-- Badges -->
+<div align="center">
 
-## What is Bosun?
+![Estado](https://img.shields.io/badge/Estado-Alpha-f97316?style=flat-square&labelColor=374151)
+![Versión](https://img.shields.io/badge/Versión-0.1.0-2563eb?style=flat-square&labelColor=374151)
+![Paradigma](https://img.shields.io/badge/Paradigma-CLI_First-22c55e?style=flat-square&labelColor=374151)
+![RAM](https://img.shields.io/badge/RAM-15MB_daemon-22c55e?style=flat-square&labelColor=374151)
+![Stack](https://img.shields.io/badge/Stack-Rust_%2B_gRPC_%2B_SQLite-0ea5e9?style=flat-square&labelColor=374151)
+![Licencia](https://img.shields.io/badge/Licencia-GPLv3+-2f855a?style=flat-square&labelColor=374151)
 
-Bosun is a PaaS that runs entirely in your terminal. No browser. No React dashboard. No hundreds of megabytes of RAM wasted on a UI you look at twice a month. Just a tiny Rust daemon on your server and a single CLI binary on your machine.
+</div>
 
-You get **deployments, metrics, log streaming, SSL certificates, and reverse proxy configuration** — everything CapRover or Dokku give you — at **less than 15 MB of RAM** for the daemon.
+## Qué es
 
-> Think of it as `htop` for your PaaS. Or Dokku rewritten in Rust with real observability.
+Bosun es un PaaS que corre enteramente en tu terminal. Sin navegador. Sin dashboard React. Sin cientos de megabytes de RAM desperdiciados en una interfaz que mirás dos veces al mes. Solo un daemon Rust diminuto en tu servidor y un solo binario CLI en tu máquina.
+
+**Bosun reemplaza CapRover, Dokku y Coolify con un solo binario Rust de ~15 MB de RAM. Sin Node.js. Sin MongoDB. Sin runtime externo. Solo Docker Engine.**
+
+Está diseñado para:
+- **VPS de $5/mes** — el daemon usa menos RAM que un solo proceso idle de Node.js
+- **Automatización total** — cada comando es scripteable, pipeable, integrable en CI/CD
+- **Zero-touch security** — CrowdSec/Fail2Ban se configuran solos en cada deploy
+- **Gobernanza de APIs** — API Gateway integrado (APISIX) con rate-limiting, caching y observabilidad
+- **Despliegues sin downtime** — rolling updates y blue-green deploy desde CLI o webhook
 
 ```
-$ bosun deploy ./my-api --domain api.acme.com --ssl
-Building… ━━━━━━━━━━━━ 100%   Deploying api… ✓   SSL enabled ✓
-
 $ bosun apps list
 ┌──────────┬──────────┬────────┬─────────────┬──────────┐
 │ APP      │ STATUS   │ CPU    │ RAM         │ UPTIME   │
 ├──────────┼──────────┼────────┼─────────────┼──────────┤
 │ api      │ running  │ 2.1%   │ 48 MB       │ 14d 3h   │
 │ frontend │ running  │ 0.8%   │ 32 MB       │ 14d 3h   │
-│ worker   │ running  │ 5.4%   │ 128 MB      │ 2h 15m   │
-│ redis    │ stopped  │ —      │ —           │ —        │
+│ redis    │ running  │ 0.3%   │ 12 MB       │ 3d 7h    │
+│ postgres │ running  │ 1.2%   │ 256 MB      │ 3d 7h    │
 └──────────┴──────────┴────────┴─────────────┴──────────┘
 
-$ bosun metrics api --live
-api  cpu: ████░░░░░░ 38%   ram: ██████░░░░ 62%   req/s: 142
+$ bosun deploy ./my-api --domain api.acme.com --ssl --strategy blue-green
+Building… ━━━━━━━━━━━━ 100%   Deploying api (blue-green)… ✓   SSL via Caddy… ✓
+Security: CrowdSec monitoring api logs ✓
 
-$ bosun apps logs worker --follow
-2026-06-28T10:23:14  job-1428 completed in 32ms
-2026-06-28T10:23:15  job-1429 completed in 28ms
+$ bosun security status
+Engine: CrowdSec 1.6  │  47 attacks blocked today
+Active bans: 12       │  Last: SQLi from 45.xxx (2m ago)
 
-$ bosun apps templates
-┌───────────┬──────────────────────────────────────┬───────────┬──────┐
-│ NAME      │ DESCRIPTION                          │ CATEGORY  │ PORT │
-├───────────┼──────────────────────────────────────┼───────────┼──────┤
-│ redis     │ Redis 7 (Alpine) — in-memory ...     │ cache     │ 6379 │
-│ postgres  │ PostgreSQL 16 (Alpine) — relati...   │ database  │ 5432 │
-│ mysql     │ MySQL 8.4 — relational database      │ database  │ 3306 │
-│ mongo     │ MongoDB 7 — document database        │ database  │27017 │
-│ nginx     │ Nginx (Alpine) — web server / ...    │ proxy     │ 80   │
-└───────────┴──────────────────────────────────────┴───────────┴──────┘
-
-$ bosun apps create redis
-🚀 Creating 'redis' from template 'redis' (port: 6379)...
-✔ Created 'redis' from template 'redis' successfully (status: deployed)
+$ bosun gateway cache enable api --ttl 60s
+Cache enabled for api  │  TTL: 60s  │  Strategy: disk
 ```
 
----
+## Capacidades
 
-## Table of Contents
+| Categoría | Capacidad | Estado |
+|---|---|---|
+| **Deploy** | Dockerfile + Docker Compose | ✅ |
+| **Deploy** | Rolling update (sin downtime) | ✅ |
+| **Deploy** | Blue-green deploy + rollback instantáneo | ✅ |
+| **Deploy** | Pre/post hooks (`--pre`, `--post`, `bosun.hooks.toml`) | ✅ |
+| **Catálogo** | 42 one-click apps con versiones | ✅ |
+| **Catálogo** | `bosun apps create redis --version 7-alpine` | ✅ |
+| **SSL** | Let's Encrypt automático vía Caddy | ✅ |
+| **Proxy** | Caddy reverse proxy con hot-reload | ✅ |
+| **Gateway** | APISIX API Gateway (rate-limit, cache, JWT auth, Prometheus) | ✅ |
+| **Observabilidad** | Métricas en vivo (CPU/RAM/network), logs streaming | ✅ |
+| **Seguridad** | CrowdSec + Fail2Ban zero-config en cada deploy | ✅ |
+| **Seguridad** | Pentesting CLI (ports, SSL, headers, secrets, CVEs) | ✅ |
+| **Auth** | JWT multi-tenant (admin/user roles, login/logout) | ✅ |
+| **Backups** | `bosun backup create/list/restore` (volúmenes + config) | ✅ |
+| **CI/CD** | Webhooks (git push → redeploy automático) | ✅ |
+| **Dashboard** | TUI interactiva (`bosun dashboard`, ratatui) | ✅ |
+| **Instalación** | Un solo comando: `curl \| sudo bash` | ✅ |
 
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Architecture](#architecture)
-- [Why Bosun?](#why-bosun)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
+### Próximos
 
----
+- [ ] Docker Swarm multi-node — deploy en clusters
+- [ ] One-click app store comunitario — compartir templates
+- [ ] Métricas históricas con retención configurable
+- [ ] Alertas (Slack, email, webhook) basadas en thresholds
 
-## Features
+### No planeados (van contra la filosofía de ser ligero)
 
-### Implemented
+- Dashboard web (React/Next.js)
+- Base de datos externa (MongoDB, PostgreSQL para el PaaS mismo)
+- Más contenedores que bosun-daemon + opcionales (Caddy, APISIX, CrowdSec)
+- Kubernetes o abstracciones multi-cloud
 
-- [x] gRPC API between CLI and daemon (protobuf-defined, streaming support)
-- [x] Docker container discovery by label (`managed-by=bosun`)
-- [x] GPLv3+ licensed — free software, always
-
-### In Progress (MVP)
-
-- [ ] `bosun deploy` — build and run containers from a Dockerfile or compose file
-- [ ] `bosun apps list|logs|restart|scale` — full application lifecycle
-- [x] `bosun apps create <template>` and `bosun apps templates` — deploy one-click apps (Redis, Postgres, MySQL, MongoDB, Nginx)
-- [ ] `bosun metrics` — real-time CPU, RAM, network per container
-- [ ] `bosun env` — environment variable management
-- [ ] `bosun config` — daemon configuration from the CLI
-- [x] `bosun deploy --ssl` — automatic Let's Encrypt HTTPS via Caddy (requires Caddy installed)
-- [ ] CI pipeline (GitHub Actions: build, test, clippy, fmt)
-
-### Planned
-
-- [ ] Reverse proxy auto-configuration (Caddy integration)
-- [ ] Health checks and auto-restart
-- [ ] Webhook triggers (deploy on `git push`)
-- [ ] Docker Swarm multi-node support
-- [ ] Persistent volume management
-
----
-
-## Quick Start
-
-> ⚠️ Bosun is in early development. These instructions show the intended workflow — not everything works yet.
-
-### Prerequisites
-
-- **Server:** Linux or macOS with [Docker Engine](https://docs.docker.com/engine/install/) 20.10+
-- **Client:** macOS or Linux with the `bosun` binary
-- **Network:** The daemon port (default `9090`) accessible from your client
-- **Caddy (optional):** The install script installs [Caddy](https://caddyserver.com/) automatically for reverse proxy and Let's Encrypt SSL
-
-### Install (one command)
-
-The fastest way to get a fresh Ubuntu/Debian VPS running Bosun:
+## Instalación rápida
 
 ```bash
+# En un VPS Ubuntu/Debian limpio:
 curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash
+
+# Con API Gateway:
+curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash -s -- --with-gateway
+
+# Con seguridad automática:
+curl -fsSL https://raw.githubusercontent.com/rquezada-tech/bosun/main/scripts/install.sh | sudo bash -s -- --with-crowdsec
 ```
 
-This single command:
-- Installs Docker Engine (if not present)
-- Installs Caddy reverse proxy (port 80/443, automatic Let's Encrypt)
-- Installs the Rust toolchain
-- Clones and builds `bosun-daemon` from source
-- Creates `/etc/bosun/` with a self-signed TLS certificate
-- Sets up a `systemd` service (auto-start, auto-restart)
-- Opens port `9090/tcp` in `ufw`
+Esto instala: Docker Engine + Caddy + bosun-daemon + systemd + TLS + firewall.
 
-After it finishes, install the CLI on your **local machine**:
-
-```bash
-cargo install --git https://github.com/rquezada-tech/bosun.git bosun
-```
-
-> **Note:** The install script is idempotent — safe to re-run. It skips steps that are already done.
-
-### Install from source (for developers)
+### Desde source (desarrolladores)
 
 ```bash
 git clone https://github.com/rquezada-tech/bosun.git
 cd bosun
-
-# Build everything
-cargo build --workspace
-
-# Run the daemon directly
-cargo run --bin bosun-daemon -- --listen 0.0.0.0:9090 --data-dir /var/lib/bosun
+cargo install --path crates/bosun
+cargo install --path crates/bosun-daemon
 ```
 
-Pre-built binaries will be available once we hit v0.1.0.
-
-### Start the daemon
-
-On your server:
+## Uso
 
 ```bash
-# If installed via the one-command script:
-systemctl start bosun-daemon
+# Conectarse al daemon
+export BOSUN_DAEMON=https://mi-server:9090
+bosun login                    # auth JWT
 
-# Or run directly:
-bosun-daemon --listen 0.0.0.0:9090 --data-dir /var/lib/bosun --cert /etc/bosun/server.crt --key /etc/bosun/server.key
+# Desplegar
+bosun deploy ./app --domain api.acme.com --ssl
+bosun deploy ./app --strategy blue-green --pre "npm test" --post "npm run migrate"
+bosun apps create redis --version 7-alpine
+bosun apps create postgres
+
+# Monitorear
+bosun apps list                # tabla con estado, CPU, RAM, uptime
+bosun metrics api --live       # htop para una app
+bosun apps logs api --follow   # logs en vivo
+
+# Gestionar
+bosun apps restart api
+bosun backup create api
+bosun backup restore abc123
+
+# Seguridad
+bosun security status          # CrowdSec/Fail2Ban: ataques bloqueados
+bosun security scan api        # pentest: puertos, SSL, headers
+bosun security report api      # reporte HTML
+
+# API Gateway
+bosun gateway status           # APISIX: rutas, plugins, métricas
+bosun gateway cache enable api --ttl 60s
+bosun gateway plugin add api rate-limit --config '{"count":100}'
+
+# Dashboard
+bosun dashboard                # TUI interactiva con todo en vivo
 ```
 
-### Connect and deploy
-
-On your local machine:
-
-```bash
-export BOSUN_DAEMON=https://my-server:9090
-
-# Deploy your first app
-bosun deploy ./my-node-app --domain api.my-site.com
-
-# Deploy with automatic HTTPS (requires Caddy)
-bosun deploy ./my-node-app --domain api.my-site.com --ssl
-
-# Check it's running
-bosun apps list
-
-# Deploy a one-click app (Redis, Postgres, MySQL, MongoDB, Nginx)
-bosun apps templates              # see available templates
-bosun apps create redis           # spin up Redis in seconds
-
-# Watch live metrics
-bosun metrics my-node-app --live
-```
-
-### Security
-
-For production, always use TLS:
-
-```bash
-bosun-daemon --listen 0.0.0.0:9090 --cert /etc/bosun/server.crt --key /etc/bosun/server.key
-bosun --cert ~/.bosun/client.crt --key ~/.bosun/client.key apps list
-```
-
----
-
-## Architecture
+## Arquitectura
 
 ```
 ┌──────────────────────┐         gRPC + TLS          ┌────────────────────────────┐
 │      bosun (CLI)     │ ◄─────────────────────────► │   bosun-daemon (server)    │
 │      Rust binary     │                             │   Rust binary              │
 │      ~8 MB           │                             │   ~10 MB / ~15 MB RAM      │
-│                      │                             │                            │
-│  • clap argument     │                             │  ┌──────────────────────┐  │
-│    parsing           │                             │  │ Docker (bollard)     │  │
-│  • tabled output     │                             │  │ • build & run        │  │
-│  • indicatif bars    │                             │  │ • stats & logs       │  │
-│  • tonic gRPC client │                             │  │ • volumes & networks │  │
-│                      │                             │  └──────────────────────┘  │
-│  Zero runtime deps   │                             │  ┌──────────────────────┐  │
-│  beyond glibc +      │                             │  │ Metrics (rusqlite)   │  │
-│  system TLS          │                             │  │ • time-series store  │  │
-│                      │                             │  │ • per-app queries    │  │
-│                      │                             │  └──────────────────────┘  │
-│                      │                             │  ┌──────────────────────┐  │
-│                      │                             │  │ Proxy config (tera)  │  │
-│                      │                             │  │ • Caddy config gen   │  │
-│                      │                             │  │ • hot-reload         │  │
-│                      │                             │  └──────────────────────┘  │
-└──────────────────────┘                             └───────────┬────────────────┘
-                                                                 │
-                                                    ┌────────────▼────────────────┐
-                                                    │   Caddy (reverse proxy)    │
-                                                    │   • automatic TLS (LE)     │
-                                                    │   • HTTP → HTTPS redirect  │
-                                                    │   • route → Docker apps    │
-                                                    └────────────────────────────┘
+└──────────────────────┘                             │                            │
+                                                     │  ┌──────────────────────┐  │
+                                                     │  │ Docker (bollard)     │  │
+                                                     │  │ • build, run, stats  │  │
+                                                     │  │ • rolling/blue-green │  │
+                                                     │  └──────────────────────┘  │
+                                                     │  ┌──────────────────────┐  │
+                                                     │  │ Caddy (reverse proxy)│  │
+                                                     │  │ • SSL auto (LE)      │  │
+                                                     │  │ • route hot-reload   │  │
+                                                     │  └──────────────────────┘  │
+                                                     │  ┌──────────────────────┐  │
+                                                     │  │ APISIX (gateway)     │  │
+                                                     │  │ • rate-limit, cache  │  │
+                                                     │  │ • JWT, Prometheus    │  │
+                                                     │  └──────────────────────┘  │
+                                                     │  ┌──────────────────────┐  │
+                                                     │  │ CrowdSec (IPS)       │  │
+                                                     │  │ • log monitoring     │  │
+                                                     │  │ • auto-ban           │  │
+                                                     │  └──────────────────────┘  │
+                                                     │  ┌──────────────────────┐  │
+                                                     │  │ SQLite (persist)     │  │
+                                                     │  │ • metrics, users     │  │
+                                                     │  │ • backups, config    │  │
+                                                     │  └──────────────────────┘  │
+                                                     └────────────────────────────┘
 ```
 
-### Design decisions
+> **Filosofía:** Bosun es dos binarios Rust + Docker Engine. No usa Node.js, MongoDB, Redis, ni ningún runtime externo. Cada línea de código debe justificar su existencia. Un VPS de $5/mes debería poder correr Bosun + todas tus apps.
 
-| Decision | Rationale |
-|---|---|
-| **gRPC instead of REST** | Streaming logs and live metrics natively. Strongly typed contracts via protobuf. Smaller wire format than JSON. |
-| **SQLite for persistence** | Zero setup. No separate DB process. Embedded, fast, reliable. Perfect for single-node PaaS. |
-| **bollard for Docker** | Mature Rust Docker client. Talks directly to `/var/run/docker.sock` — no daemon, no socket proxy. |
-| **CLI-only, no web UI** | The browser is the heaviest part of any PaaS. A CLI is scriptable, pipeable, automatable. Less code, fewer bugs, lower attack surface. |
-| **Single binary per side** | No runtime dependencies. Copy `bosun-daemon` to your server and run it. That's it. |
+## Diferencia con otros proyectos
 
-### Resource usage (estimated vs CapRover)
+| **Característica**       | **Bosun** | **CapRover** | **Dokku** | **Coolify** | **Kamal** |
+|---------------------------|-----------|-------------|-----------|-------------|-----------|
+| **Dashboard**             | TUI (ratatui) | Web (React) | Ninguno | Web (Next.js) | Ninguno |
+| **RAM del PaaS**          | ~15 MB    | ~500 MB     | ~50 MB    | ~300 MB     | ~50 MB    |
+| **Dependencias externas** | 0         | Node + MongoDB | Bash    | PHP + Next   | Ruby      |
+| **SSL automático**        | ✅ Caddy  | ✅ Let's Encrypt | ✅       | ✅           | ✅        |
+| **Rolling update**        | ✅        | ❌          | ❌        | ❌          | ✅        |
+| **Blue-green deploy**     | ✅        | ❌          | ❌        | ❌          | ❌        |
+| **Catálogo apps**         | 42 apps   | 100+ apps   | Plugins  | 50+ apps    | ❌        |
+| **API Gateway integrado** | ✅ APISIX | ❌          | ❌        | ❌          | ❌        |
+| **Seguridad automática**  | ✅ CrowdSec | ❌        | ❌        | ❌          | ❌        |
+| **Pentesting CLI**        | ✅        | ❌          | ❌        | ❌          | ❌        |
+| **Auth multi-tenant**     | ✅ JWT    | ✅          | ❌        | ✅          | ❌        |
+| **Backup/Restore**        | ✅        | ✅          | ❌        | ✅          | ❌        |
+| **Instalación**           | `curl \| bash` | Script   | `apt-get` | `docker run` | Ruby gem |
+| **Lenguaje**              | Rust      | TypeScript  | Bash      | PHP         | Ruby      |
 
-| Resource | CapRover (typical) | Bosun (estimated) | Reduction |
-|---|---|---|---|
-| Daemon RAM | 300–500 MB | **15–30 MB** | ~95% |
-| Disk (deps) | ~400 MB | **~15 MB** | ~96% |
-| CPU idle | 1–3% | **<0.1%** | ~97% |
-| Web dashboard RAM | 80–150 MB | **0 MB** | 100% |
-| External runtimes | Node, MongoDB | **None** (only Docker) | All eliminated |
+**Bosun es el único PaaS con API Gateway, seguridad automática, pentesting CLI, y dashboard TUI — todo en menos de 15 MB de RAM.**
 
----
+## Estructura del proyecto
 
-## Why Bosun?
+```
+bosun/
+├── crates/
+│   ├── bosun/               # CLI (cliente gRPC)
+│   │   └── src/
+│   │       ├── main.rs      # Entry point
+│   │       ├── cli.rs       # Argumentos y handlers (apps, deploy, metrics, backup...)
+│   │       ├── client.rs    # Cliente gRPC con auth token
+│   │       └── proto.rs     # Código generado protobuf
+│   └── bosun-daemon/        # Daemon (servidor gRPC)
+│       └── src/
+│           ├── main.rs      # Entry point, TLS, gRPC server, webhook server
+│           ├── server/      # Handlers gRPC (Bosun trait)
+│           ├── docker/      # Cliente Docker (bollard): deploy, metrics, logs
+│           ├── templates/   # Catálogo TOML de 42 apps
+│           ├── auth/        # JWT auth, interceptor, roles
+│           ├── backup/      # Backup/Restore de volúmenes
+│           ├── security/    # CrowdSec/Fail2Ban + pentesting
+│           ├── gateway/     # APISIX Admin API client
+│           ├── metrics/     # Recolección de métricas Docker
+│           ├── health/      # Health checker + auto-restart
+│           ├── webhook/     # HTTP server para git push → redeploy
+│           ├── hooks/       # Pre/post deploy hooks
+│           ├── deploy/      # Estrategias (direct, rolling, blue-green)
+│           ├── proxy/       # Caddy Admin API client
+│           ├── persist/     # SQLite (users, metrics, config, apps)
+│           └── templates/   # Motor de catálogo TOML
+├── templates/catalog/       # 42 archivos .toml de apps
+├── proto/bosun/v1/          # Definiciones protobuf gRPC
+├── scripts/
+│   ├── install.sh           # Bootstrap VPS (un comando)
+│   ├── uninstall.sh         # Limpieza completa
+│   └── bosun-daemon.service # Unit systemd
+├── docs/plans/              # Planes de arquitectura e implementación
+└── .github/workflows/       # CI/CD (7 jobs)
+```
 
-### The problem with current PaaS tools
+## Política de contribución
 
-- **CapRover** is great, but it needs Node.js, MongoDB, and a React dashboard. On a 1 GB VPS, CapRover alone eats 30–50% of your RAM before you deploy a single app.
-- **Dokku** is minimal (Bash), but Bash at 12k+ lines is fragile. No real metrics. No streaming logs over the network. Hard to extend.
-- **Coolify** requires PHP and Next.js. Powerful but heavy.
-- **Kamal** is CLI-first, but tied to Ruby and Rails conventions.
+> **Este proyecto es privado en desarrollo activo. Eventualmente será público bajo la misma política.**
 
-### Bosun's answer
+Bosun da la bienvenida a contribuciones de la comunidad. El proyecto sigue un **modelo de contribución abierta** con los siguientes principios:
 
-> A PaaS should use fewer resources than the apps it hosts.
+### ¿Cómo contribuir?
 
-If your API needs 100 MB of RAM and your PaaS needs 500 MB, the PaaS is the expensive part. Bosun flips this: **the daemon uses less RAM than a single idle Node.js process.**
+**1. Código (Rust)**
+- Abre un issue primero para discutir cambios mayores
+- Los PRs pequeños son mejores: resuelven un problema específico
+- `cargo fmt`, `cargo clippy -- -D warnings`, `cargo test` deben pasar
+- Respeta la filosofía del proyecto: simple, sin dependencias externas innecesarias
 
-For the price of a $5/month VPS, you get:
-- Automated Docker deployments
-- Real-time metrics
-- Streaming logs
-- SSL certificates (automatic via Caddy + Let's Encrypt)
-- Reverse proxy routing (Caddy)
+**2. Catálogo de apps**
+- Agrega templates en `templates/catalog/` siguiendo el formato TOML
+- Cada template debe tener: nombre, descripción, categoría, al menos una versión con imagen Docker
+- Las imágenes deben ser oficiales o de maintainers verificados (Docker Hub)
 
-No Kubernetes. No cloud vendor lock-in. No dashboard you don't need.
+**3. Reporte de errores**
+- Usa issues para reportar bugs con pasos para reproducir
+- Incluye logs del daemon (`journalctl -u bosun-daemon -n 100`)
+- Para bugs de deploy: incluye el Dockerfile o template usado
 
----
+**4. Mejoras y features**
+- Discutimos en issues antes de implementar
+- Se valora especialmente todo lo que reduzca el uso de RAM o simplifique el stack
 
-## Roadmap
+### Lo que NO vamos a aceptar
 
-| Version | Scope | Target |
-|---|---|---|
-| **v0.1.0** | MVP: deploy, apps list/logs, metrics, env vars | Q3 2026 |
-| **v0.2.0** | SSL (Let's Encrypt), reverse proxy auto-config | Q4 2026 |
-| **v0.3.0** | One-click apps, webhook triggers, health checks | Q1 2027 |
-| **v0.4.0** | Docker Swarm support, multi-node | Q2 2027 |
-| **v1.0.0** | Stable API, backwards compatibility guarantees | TBD |
+- Features que requieran servicios externos o conexión a Internet (salvo Let's Encrypt y webhooks)
+- Código que agregue dependencias de runtime pesadas (Node.js, Python, Ruby)
+- Un dashboard web — el dashboard TUI es suficiente y deliberado
+- Cambios que rompan la compatibilidad hacia atrás de la API gRPC
 
-Roadmap details and task-level breakdowns live in [`docs/plans/`](docs/plans/).
+### Proceso de PR
 
----
+```
+1. Fork del repositorio
+2. Crea una rama: git checkout -b feat/mi-mejora
+3. Haz tus cambios y commitea: git commit -m "feat: descripción clara"
+4. Push a tu fork: git push origin feat/mi-mejora
+5. Abre un Pull Request con descripción clara de qué y por qué
+```
 
-## Contributing
+### Normas de conducta
 
-Bosun is a community project. We welcome contributions of all kinds — code, documentation, bug reports, feature ideas, and feedback from real-world deployments.
-
-### Getting started
-
-1. **Read the architecture plan:** [`docs/plans/2026-06-28-mvp-architecture.md`](docs/plans/2026-06-28-mvp-architecture.md) — it explains the project structure, design decisions, and what each module does.
-2. **Set up your environment:**
-
-   ```bash
-   git clone https://github.com/rquezada-tech/bosun.git
-   cd bosun
-   cargo build --workspace          # compiles both crates
-   cargo test --workspace           # runs all tests
-   cargo clippy --workspace -- -D warnings  # lint
-   ```
-
-3. **Pick an issue:** Check the GitHub Issues for tasks tagged `good first issue` or `help wanted`. The [MVP plan](docs/plans/2026-06-28-mvp-architecture.md) has bite-sized tasks with exact file paths and code examples.
-
-### Pull request workflow
-
-1. **Fork** the repository
-2. **Create a branch:** `git checkout -b feat/my-feature` (use `feat/`, `fix/`, `docs/`, or `chore/` prefix)
-3. **Write tests first** — we practice TDD for all feature work
-4. **Keep PRs small:** ideally under 400 lines changed. If your feature is larger, break it into stacked PRs.
-5. **Run the quality gates before pushing:**
-
-   ```bash
-   cargo fmt --all -- --check
-   cargo clippy --workspace -- -D warnings
-   cargo test --workspace
-   ```
-
-6. **Open a PR** against the `develop` branch with a clear description of what it does and why.
-7. **Wait for review.** At least one maintainer must approve before merge.
-
-### Where to get help
-
-- **GitHub Issues:** Bug reports, feature requests, questions
-- **Discussions:** Coming soon — architectural RFCs and community support
-
-### Code of Conduct
-
-We follow the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Be kind. Be constructive. Assume good faith.
-
-### Contributors
-
-<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
-<!-- ALL-CONTRIBUTORS-LIST:END -->
-
-This project follows the [all-contributors](https://github.com/all-contributors/all-contributors) specification. Contributions of any kind are welcome.
-
----
-
-## License
-
-Bosun is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License** as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-See [LICENSE](LICENSE) for the full text.
-
-> **Why GPLv3+?** Bosun replaces proprietary and source-available PaaS tools. Copyleft ensures every improvement — from us or the community — stays free for everyone. If you deploy Bosun in production, your users deserve the same freedoms you got.
+- Sé respetuoso con otros colaboradores
+- Las discusiones técnicas se resuelven con datos, no con opinión
+- Prioriza la utilidad práctica sobre la elegancia teórica
 
 ---
 
-<p align="center">
-  <sub>Built with Rust. Driven by the community. Licensed for freedom.</sub>
-</p>
+## Licencia
+
+GPLv3+. Ver [LICENSE](LICENSE).
+
+> **¿Por qué GPLv3+?** Bosun reemplaza herramientas PaaS privativas y source-available. El copyleft asegura que cada mejora — nuestra o de la comunidad — permanezca libre para todos. Si desplegás Bosun en producción, tus usuarios merecen las mismas libertades que vos recibiste.
+
+---
+
+*Bosun: el PaaS que no pesa más que las apps que hostea.*

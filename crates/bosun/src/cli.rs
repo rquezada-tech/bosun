@@ -66,9 +66,9 @@ impl Cli {
 
         match &self.command {
             Command::Apps { sub } => self.run_apps(&mut client, sub).await,
-            Command::Deploy { path, domain, ssl, strategy } => {
+            Command::Deploy { path, domain, ssl, strategy, pre_hooks, post_hooks } => {
                 let deploy_strategy: DeployStrategy = strategy.clone().into();
-                self.run_deploy(&mut client, path, domain.as_deref(), *ssl, &deploy_strategy).await
+                self.run_deploy(&mut client, path, domain.as_deref(), *ssl, &deploy_strategy, pre_hooks, post_hooks).await
             }
             Command::Metrics { app, live } => {
                 self.run_metrics(&mut client, app.as_deref(), *live).await
@@ -84,6 +84,9 @@ impl Cli {
             Command::Logout => self.run_logout().await,
             Command::Whoami => self.run_whoami().await,
             Command::Backup { sub } => self.run_backup(&mut client, sub).await,
+            Command::Gateway { .. } | Command::Security { .. } => {
+                anyhow::bail!("Command not yet available in this build")
+            }
         }
     }
 }
@@ -372,6 +375,8 @@ impl Cli {
                 env,
                 Some(template.default_port),
                 DeployStrategy::Direct,
+                &[],
+                &[],
             )
             .await?;
 
@@ -399,8 +404,68 @@ impl Cli {
         domain: Option<&str>,
         ssl: bool,
         strategy: &DeployStrategy,
+        pre_hooks: &[String],
+        post_hooks: &[String],
     ) -> anyhow::Result<()> {
         let strategy_label = strategy_label(strategy);
+
+        // Auto-detect bosun.hooks.toml if present in the build directory
+        let mut all_pre_hooks = pre_hooks.to_vec();
+        let mut all_post_hooks = post_hooks.to_vec();
+
+        let hooks_path = std::path::Path::new(path).join("bosun.hooks.toml");
+        if hooks_path.exists() {
+            match std::fs::read_to_string(&hooks_path) {
+                Ok(content) => {
+                    match toml::from_str::<toml::Table>(&content) {
+                        Ok(table) => {
+                            let mut found = false;
+                            if let Some(pre) = table.get("pre_deploy").and_then(|v| v.get("commands")).and_then(|v| v.as_array()) {
+                                let cmds: Vec<String> = pre.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                                if !cmds.is_empty() {
+                                    if !self.json {
+                                        eprintln!("📋 Found {cnt} pre-deploy hook(s) in bosun.hooks.toml", cnt = cmds.len());
+                                    }
+                                    all_pre_hooks.extend(cmds);
+                                    found = true;
+                                }
+                            }
+                            if let Some(post) = table.get("post_deploy").and_then(|v| v.get("commands")).and_then(|v| v.as_array()) {
+                                let cmds: Vec<String> = post.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                                if !cmds.is_empty() {
+                                    if !self.json {
+                                        eprintln!("📋 Found {cnt} post-deploy hook(s) in bosun.hooks.toml", cnt = cmds.len());
+                                    }
+                                    all_post_hooks.extend(cmds);
+                                    found = true;
+                                }
+                            }
+                            if !found && !self.json {
+                                eprintln!("📋 bosun.hooks.toml found but no hooks defined");
+                            }
+                        }
+                        Err(e) => {
+                            if !self.json {
+                                eprintln!("⚠ Failed to parse bosun.hooks.toml: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if !self.json {
+                        eprintln!("⚠ Failed to read bosun.hooks.toml: {e}");
+                    }
+                }
+            }
+        }
+
+        if !all_pre_hooks.is_empty() && !self.json {
+            eprintln!("🔧 Will run {} pre-deploy hook(s)", all_pre_hooks.len());
+        }
+        if !all_post_hooks.is_empty() && !self.json {
+            eprintln!("🔧 Will run {} post-deploy hook(s)", all_post_hooks.len());
+        }
+
         if !self.json {
             eprintln!("🚀 Deploying {path} (strategy: {strategy_label})...");
         }
@@ -413,6 +478,8 @@ impl Cli {
                 std::collections::HashMap::new(),
                 None,
                 *strategy,
+                &all_pre_hooks,
+                &all_post_hooks,
             )
             .await?;
 
@@ -915,6 +982,751 @@ impl Cli {
         }
         Ok(())
     }
+    // ── Gateway ────────────────────────────────────────────────────
+
+    async fn run_gateway(
+        &self,
+        client: &mut BosunClient,
+        sub: &GatewayCmd,
+    ) -> anyhow::Result<()> {
+        match sub {
+            GatewayCmd::Status => self.gateway_status(client).await,
+            GatewayCmd::Routes => self.gateway_routes(client).await,
+            GatewayCmd::Plugin {
+                app,
+                plugin,
+                config,
+            } => self.gateway_plugin(client, app, plugin, config.as_deref()).await,
+            GatewayCmd::Cache { sub } => self.gateway_cache(client, sub).await,
+            GatewayCmd::Metrics => self.gateway_metrics(client).await,
+        }
+    }
+
+    async fn gateway_status(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let status = client.get_gateway_status().await?;
+
+        if self.json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "gateway_status": "ok",
+                "message": format!("{:?}", status.status),
+            }))?);
+            return Ok(());
+        }
+
+        let enabled = format!("{:?}", status.status) == "Some(Running)";
+        let version = "unknown";
+
+        if enabled {
+            println!("✔ APISIX Gateway: ENABLED");
+            println!("  Version: {version}");
+        } else {
+            println!("✘ APISIX Gateway: DISABLED");
+            println!("  {version}");
+            println!("\n  To enable APISIX, start it via Docker:");
+            println!("    docker run -d --name apisix --network bosun \\");
+            println!("      -p 9080:9080 -p 9180:9180 apache/apisix");
+        }
+        Ok(())
+    }
+
+    async fn gateway_routes(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let resp = client.list_gateway_routes().await?;
+        let routes = resp.routes;
+
+        if self.json {
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "route_count": routes.len(),
+            }))?;
+            println!("{json}");
+            return Ok(());
+        }
+
+        if routes.is_empty() {
+            println!("No APISIX routes configured.");
+            return Ok(());
+        }
+
+        use tabled::{Table, Tabled};
+        #[derive(Tabled)]
+        struct RouteRow {
+            #[tabled(rename = "APP")]
+            name: String,
+            #[tabled(rename = "DOMAIN")]
+            domain: String,
+            #[tabled(rename = "PORT")]
+            port: String,
+            #[tabled(rename = "URI")]
+            uri: String,
+            #[tabled(rename = "PLUGINS")]
+            plugins: String,
+        }
+
+        let rows: Vec<RouteRow> = routes
+            .iter()
+            .map(|r| RouteRow {
+                name: r.name.clone(),
+                domain: r.domain.clone(),
+                port: r.port.to_string(),
+                uri: r.uri.clone(),
+                plugins: r.plugins.join(", "),
+            })
+            .collect();
+
+        let table = Table::new(rows);
+        println!("{table}");
+        Ok(())
+    }
+
+    async fn gateway_plugin(
+        &self,
+        client: &mut BosunClient,
+        app: &str,
+        plugin: &str,
+        config: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let config_json = config.unwrap_or("{}");
+        client
+            .enable_gateway_plugin(app, plugin, config_json)
+            .await?;
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "action": "enable_plugin",
+                    "app": app,
+                    "plugin": plugin,
+                    "status": "ok"
+                }))?
+            );
+        } else {
+            println!("✔ Plugin '{plugin}' enabled for app '{app}'.");
+        }
+        Ok(())
+    }
+
+    async fn gateway_cache(
+        &self,
+        client: &mut BosunClient,
+        sub: &CacheCmd,
+    ) -> anyhow::Result<()> {
+        match sub {
+            CacheCmd::Enable { app, ttl } => {
+                // Enable cache by enabling proxy-cache plugin
+                let config = serde_json::json!({
+                    "cache_ttl": ttl,
+                    "cache_strategy": "disk",
+                    "cache_http_status": [200, 301, 302],
+                    "cache_method": ["GET", "HEAD"],
+                });
+                client
+                    .enable_gateway_plugin(app, "proxy-cache", &config.to_string())
+                    .await?;
+
+                if self.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "action": "cache_enable",
+                            "app": app,
+                            "ttl_secs": ttl,
+                            "status": "ok"
+                        }))?
+                    );
+                } else {
+                    println!("✔ Cache enabled for '{app}' (TTL: {ttl}s).");
+                }
+            }
+            CacheCmd::Disable { app } => {
+                client.disable_gateway_plugin(app, "proxy-cache").await?;
+
+                if self.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "action": "cache_disable",
+                            "app": app,
+                            "status": "ok"
+                        }))?
+                    );
+                } else {
+                    println!("✔ Cache disabled for '{app}'.");
+                }
+            }
+            CacheCmd::Stats { app } => {
+                let stats = client.get_gateway_cache_stats(app).await?;
+
+                if self.json {
+                    let s = stats.stats.as_ref();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "cache_stats": "ok",
+                            "hits": s.map(|s| s.hits).unwrap_or(0),
+                            "misses": s.map(|s| s.misses).unwrap_or(0),
+                            "size_bytes": s.map(|s| s.size_bytes).unwrap_or(0),
+                        }))?
+                    );
+                    return Ok(());
+                }
+
+                let s = stats.stats.as_ref();
+                let hits = s.map(|s| s.hits).unwrap_or(0);
+                let misses = s.map(|s| s.misses).unwrap_or(0);
+                let size_mb = s.map(|s| s.size_bytes).unwrap_or(0) as f64 / 1_048_576.0;
+
+                println!("Cache stats for '{app}':");
+                println!("  Hits:   {hits}");
+                println!("  Misses: {misses}");
+                println!("  Size:   {:.1} MB", size_mb);
+            }
+            CacheCmd::Purge { app } => {
+                client.purge_gateway_cache(app).await?;
+
+                if self.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "action": "cache_purge",
+                            "app": app,
+                            "status": "ok"
+                        }))?
+                    );
+                } else {
+                    println!("✔ Cache purged for '{app}'.");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn gateway_metrics(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let resp = client.get_gateway_metrics().await?;
+        let metrics_text = resp.metrics_text;
+
+        if self.json {
+            let lines: Vec<&str> = metrics_text.lines().collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "metrics": lines,
+                }))?
+            );
+            return Ok(());
+        }
+
+        if metrics_text.is_empty() {
+            println!("No Prometheus metrics available from APISIX.");
+            println!("Ensure the Prometheus plugin is enabled in APISIX config.");
+            return Ok(());
+        }
+
+        // Print a summary: show key metrics with human-readable names
+        println!("APISIX Prometheus Metrics Summary:");
+        println!("──────────────────────────────────");
+
+        let summary_keys = [
+            ("apisix_http_status", "HTTP requests by status code"),
+            ("apisix_http_latency", "HTTP request latency"),
+            ("apisix_bandwidth", "Bandwidth (ingress/egress)"),
+            ("apisix_etcd_reachable", "etcd reachable"),
+            ("apisix_node_info", "Node info"),
+        ];
+
+        for (prefix, label) in &summary_keys {
+            let mut found = false;
+            for line in metrics_text.lines() {
+                if line.starts_with(prefix) && !line.starts_with(&format!("{}_", prefix)) {
+                    if !found {
+                        println!("\n  {label}:");
+                        found = true;
+                    }
+                    // Extract metric name and value
+                    if let Some(rest) = line.strip_prefix(prefix) {
+                        let metric_part = rest.trim_start_matches('{');
+                        if let Some(brace_end) = metric_part.find('}') {
+                            let val = metric_part[brace_end + 1..].trim();
+                            let labels = &metric_part[..brace_end];
+                            println!("    {}{} = {val}", prefix, labels);
+                        } else if let Some(space) = rest.find(' ') {
+                            println!("    {}{}", prefix, rest);
+                        }
+                    }
+                }
+            }
+            if !found {
+                println!("\n  {label}: (no data)");
+            }
+        }
+
+        // Show cache metrics if present
+        let cache_prefixes = ["apisix_cache_hit", "apisix_cache_miss", "apisix_cache_size"];
+        let mut has_cache = false;
+        for line in metrics_text.lines() {
+            for cp in &cache_prefixes {
+                if line.starts_with(cp) {
+                    if !has_cache {
+                        println!("\n  Cache Metrics:");
+                        has_cache = true;
+                    }
+                    println!("    {line}");
+                    break;
+                }
+            }
+        }
+
+        println!("\n  (Run `bosun gateway metrics --json` for full Prometheus output)");
+        Ok(())
+    }
+
+    // ── Security ──────────────────────────────────────────────────
+
+    async fn run_security(
+        &self,
+        client: &mut BosunClient,
+        sub: &SecurityCmd,
+    ) -> anyhow::Result<()> {
+        match sub {
+            SecurityCmd::Status => self.security_status(client).await,
+            SecurityCmd::Decisions => self.security_decisions(client).await,
+            SecurityCmd::Scan { app, host } => {
+                self.security_scan(app, host.as_deref()).await
+            }
+            SecurityCmd::Report { app, output, host } => {
+                self.security_report(
+                    app,
+                    host.as_deref(),
+                    output.as_deref(),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn security_status(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let resp = client.get_security_status().await?;
+        let status = resp.status.as_ref();
+
+        let engine = status
+            .map(|s| s.engine.as_str())
+            .unwrap_or("unknown");
+        let attacks = status.map(|s| s.attacks_blocked).unwrap_or(0);
+        let bans = status.map(|s| s.active_bans).unwrap_or(0);
+
+        if self.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "engine": engine,
+                    "attacks_blocked": attacks,
+                    "active_bans": bans,
+                }))?
+            );
+            return Ok(());
+        }
+
+        println!("Security Engine: {engine}");
+        println!("  Attacks blocked: {attacks}");
+        println!("  Active bans:     {bans}");
+        Ok(())
+    }
+
+    async fn security_decisions(&self, client: &mut BosunClient) -> anyhow::Result<()> {
+        let resp = client.get_security_decisions().await?;
+        let decisions = resp.decisions;
+
+        if self.json {
+            let decisions_json: Vec<serde_json::Value> = decisions.iter().map(|d| {
+                serde_json::json!({
+                    "ip": d.ip,
+                    "reason": d.reason,
+                    "action": d.action,
+                    "expires_unix": d.expires_unix,
+                })
+            }).collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&decisions_json)?
+            );
+            return Ok(());
+        }
+
+        if decisions.is_empty() {
+            println!("No active bans/decisions.");
+            return Ok(());
+        }
+
+        use tabled::{Table, Tabled};
+        #[derive(Tabled)]
+        struct DecisionRow {
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "REASON")]
+            reason: String,
+            #[tabled(rename = "ACTION")]
+            action: String,
+            #[tabled(rename = "EXPIRES")]
+            expires: String,
+        }
+
+        let rows: Vec<DecisionRow> = decisions
+            .iter()
+            .map(|d| {
+                let expires = if d.expires_unix == 0 {
+                    "N/A".to_string()
+                } else {
+                    chrono_human(d.expires_unix)
+                };
+                DecisionRow {
+                    ip: d.ip.clone(),
+                    reason: d.reason.clone(),
+                    action: d.action.clone(),
+                    expires,
+                }
+            })
+            .collect();
+
+        let table = Table::new(rows);
+        println!("{table}");
+        Ok(())
+    }
+
+    async fn security_scan(
+        &self,
+        app: &str,
+        host: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let target = host.unwrap_or("localhost");
+
+        eprintln!("Running security scan for '{app}' on {target}...");
+        eprintln!();
+
+        if self.json {
+            let mut results = serde_json::Map::new();
+            results.insert(
+                "app".to_string(),
+                serde_json::Value::String(app.to_string()),
+            );
+            results.insert(
+                "host".to_string(),
+                serde_json::Value::String(target.to_string()),
+            );
+            results.insert(
+                "ports".to_string(),
+                serde_json::to_value(self.scan_ports_json(target).await)?,
+            );
+            results.insert(
+                "ssl".to_string(),
+                serde_json::to_value(self.scan_ssl_json(target).await)?,
+            );
+            results.insert(
+                "headers".to_string(),
+                serde_json::to_value(self.scan_headers_json(target).await)?,
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Object(results))?
+            );
+            return Ok(());
+        }
+
+        // Port scan
+        println!("--- Port Scan ---");
+        let ports = self.scan_ports(target).await;
+        for (port, open) in &ports {
+            let status = if *open { "OPEN  " } else { "closed" };
+            let label = match port {
+                80 => "HTTP",
+                443 => "HTTPS",
+                8080 => "HTTP-alt",
+                3000 => "Webapp",
+                5432 => "PostgreSQL",
+                6379 => "Redis",
+                _ => "other",
+            };
+            println!("  {status}  {port:>5}/tcp  ({label})");
+        }
+
+        // SSL check
+        println!();
+        println!("--- SSL Check ---");
+        let ssl_result = self.scan_ssl(target).await;
+        println!("  {ssl_result}");
+
+        // Headers check
+        println!();
+        println!("--- Security Headers ---");
+        let header_results = self.scan_headers(target).await;
+        for (header, present) in &header_results {
+            let status = if *present { "[+]" } else { "[-]" };
+            println!("  {status} {header}");
+        }
+
+        Ok(())
+    }
+
+    /// Scan common ports on a host. Returns Vec of (port, is_open).
+    async fn scan_ports(&self, host: &str) -> Vec<(u16, bool)> {
+        let ports = [80, 443, 8080, 3000, 5432, 6379];
+        let mut results = Vec::new();
+
+        for &port in &ports {
+            let addr = format!("{host}:{port}");
+            let is_open = tokio::net::TcpStream::connect(&addr).await.is_ok();
+            results.push((port, is_open));
+        }
+
+        results
+    }
+
+    async fn scan_ports_json(&self, host: &str) -> serde_json::Value {
+        let ports = self.scan_ports(host).await;
+        let open_ports: Vec<u16> = ports
+            .iter()
+            .filter(|(_, open)| *open)
+            .map(|(p, _)| *p)
+            .collect();
+        serde_json::json!({
+            "open": open_ports,
+            "total_scanned": ports.len(),
+        })
+    }
+
+    /// Check SSL certificate on host:443.
+    async fn scan_ssl(&self, host: &str) -> String {
+        let url = format!("https://{host}/");
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return format!("[FAIL] Failed to create HTTPS client: {e}"),
+        };
+
+        match client.get(&url).send().await {
+            Ok(_resp) => "[OK] SSL/TLS active".to_string(),
+            Err(e) => {
+                if e.is_connect() {
+                    // Try HTTP as fallback
+                    let http_url = format!("http://{host}/");
+                    match client.get(&http_url).send().await {
+                        Ok(_) => "[WARN] No SSL/TLS on port 443 (HTTP only on port 80)".to_string(),
+                        Err(_) => "[FAIL] No connection on port 443 or 80".to_string(),
+                    }
+                } else if e.is_timeout() {
+                    "[WARN] SSL/TLS timeout - port may be filtered".to_string()
+                } else {
+                    format!("[FAIL] SSL/TLS check failed: {e}")
+                }
+            }
+        }
+    }
+
+    async fn scan_ssl_json(&self, host: &str) -> serde_json::Value {
+        let result = self.scan_ssl(host).await;
+        let has_ssl = result.starts_with("[OK]");
+        serde_json::json!({
+            "has_ssl": has_ssl,
+            "detail": result,
+        })
+    }
+
+    /// Check for missing security headers on the target.
+    async fn scan_headers(&self, host: &str) -> Vec<(String, bool)> {
+        let required_headers = [
+            "Content-Security-Policy",
+            "Strict-Transport-Security",
+            "X-Frame-Options",
+            "X-Content-Type-Options",
+            "Referrer-Policy",
+        ];
+
+        let url = format!("https://{host}/");
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+
+        let client = match client {
+            Ok(c) => c,
+            Err(_) => {
+                return required_headers
+                    .iter()
+                    .map(|h| (h.to_string(), false))
+                    .collect();
+            }
+        };
+
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let headers = resp.headers();
+                required_headers
+                    .iter()
+                    .map(|h| {
+                        (
+                            h.to_string(),
+                            headers.contains_key(*h),
+                        )
+                    })
+                    .collect()
+            }
+            Err(_) => {
+                // Try HTTP as fallback
+                let url = format!("http://{host}/");
+                match client.get(&url).send().await {
+                    Ok(resp) => {
+                        let headers = resp.headers();
+                        required_headers
+                            .iter()
+                            .map(|h| {
+                                (
+                                    h.to_string(),
+                                    headers.contains_key(*h),
+                                )
+                            })
+                            .collect()
+                    }
+                    Err(_) => required_headers
+                        .iter()
+                        .map(|h| (h.to_string(), false))
+                        .collect(),
+                }
+            }
+        }
+    }
+
+    async fn scan_headers_json(&self, host: &str) -> serde_json::Value {
+        let results = self.scan_headers(host).await;
+        let present: Vec<&str> = results
+            .iter()
+            .filter(|(_, p)| *p)
+            .map(|(h, _)| h.as_str())
+            .collect();
+        let missing: Vec<&str> = results
+            .iter()
+            .filter(|(_, p)| !*p)
+            .map(|(h, _)| h.as_str())
+            .collect();
+        serde_json::json!({
+            "present": present,
+            "missing": missing,
+        })
+    }
+
+    /// Generate a pentest HTML report.
+    async fn security_report(
+        &self,
+        app: &str,
+        host: Option<&str>,
+        output: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let target = host.unwrap_or("localhost");
+        let output_path = output
+            .map(|o| o.to_string())
+            .unwrap_or_else(|| format!("bosun-pentest-{app}.html"));
+
+        eprintln!("Generating pentest report for '{app}' on {target}...");
+
+        let ports = self.scan_ports(target).await;
+        let ssl = self.scan_ssl(target).await;
+        let headers = self.scan_headers(target).await;
+
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let mut ports_html = String::new();
+        for (port, open) in &ports {
+            let cls = if *open { "open" } else { "closed" };
+            let label = match port {
+                80 => "HTTP",
+                443 => "HTTPS",
+                8080 => "HTTP-alt",
+                3000 => "Webapp",
+                5432 => "PostgreSQL",
+                6379 => "Redis",
+                _ => "other",
+            };
+            ports_html.push_str(&format!(
+                "<tr><td>{port}</td><td class=\"{cls}\">{}</td><td>{label}</td></tr>",
+                if *open { "Open" } else { "Closed" }
+            ));
+        }
+
+        let mut headers_html = String::new();
+        for (header, present) in &headers {
+            let cls = if *present { "present" } else { "missing" };
+            headers_html.push_str(&format!(
+                "<tr><td>{header}</td><td class=\"{cls}\">{}</td></tr>",
+                if *present { "[+] Present" } else { "[-] Missing" }
+            ));
+        }
+
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bosun Pentest Report - {app}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #0d1117; color: #c9d1d9; }}
+h1 {{ color: #58a6ff; border-bottom: 2px solid #30363d; padding-bottom: 10px; }}
+h2 {{ color: #f0883e; margin-top: 30px; }}
+table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
+th, td {{ padding: 8px 12px; text-align: left; border-bottom: 1px solid #30363d; }}
+th {{ background: #161b22; color: #8b949e; }}
+.open, .present {{ color: #3fb950; font-weight: bold; }}
+.closed, .missing {{ color: #f85149; }}
+.ssl-ok {{ color: #3fb950; }}
+.ssl-warn {{ color: #d2991d; }}
+.ssl-err {{ color: #f85149; }}
+footer {{ margin-top: 40px; font-size: 0.85em; color: #8b949e; border-top: 1px solid #30363d; padding-top: 10px; }}
+</style>
+</head>
+<body>
+<h1>Bosun Pentest Report</h1>
+<p><strong>Target:</strong> {app} ({target})</p>
+<p><strong>Generated:</strong> {now}</p>
+
+<h2>Port Scan</h2>
+<table>
+    <tr><th>Port</th><th>Status</th><th>Service</th></tr>
+    {ports_html}
+</table>
+
+<h2>SSL/TLS Check</h2>
+<p class="{ssl_class}">{ssl}</p>
+
+<h2>Security Headers</h2>
+<table>
+    <tr><th>Header</th><th>Status</th></tr>
+    {headers_html}
+</table>
+
+<footer>
+    Generated by Bosun CLI - <code>bosun security report {app}</code>
+</footer>
+</body>
+</html>"#,
+            app = app,
+            target = target,
+            now = now,
+            ports_html = ports_html,
+            ssl = ssl,
+            ssl_class = if ssl.starts_with("[OK]") {
+                "ssl-ok"
+            } else if ssl.starts_with("[WARN]") {
+                "ssl-warn"
+            } else {
+                "ssl-err"
+            },
+            headers_html = headers_html,
+        );
+
+        std::fs::write(&output_path, &html)?;
+        eprintln!("Report saved to: {output_path}");
+
+        Ok(())
+    }
 }
 
 // ── Subcommand types ──────────────────────────────────────────────
@@ -939,6 +1751,12 @@ pub enum Command {
         /// Deploy strategy (direct, rolling, or blue-green)
         #[arg(long, value_enum, default_value = "direct")]
         strategy: StrategyArg,
+        /// Shell command to run on the host before build (can be specified multiple times)
+        #[arg(long = "pre")]
+        pre_hooks: Vec<String>,
+        /// Shell command to run on the host after deploy + health check (can be specified multiple times)
+        #[arg(long = "post")]
+        post_hooks: Vec<String>,
     },
     /// Show resource metrics for apps
     Metrics {
@@ -979,6 +1797,16 @@ pub enum Command {
     Backup {
         #[command(subcommand)]
         sub: BackupCmd,
+    },
+    /// Manage APISIX API Gateway (routes, plugins, cache, metrics)
+    Gateway {
+        #[command(subcommand)]
+        sub: GatewayCmd,
+    },
+    /// Security scanning and pentesting tools
+    Security {
+        #[command(subcommand)]
+        sub: SecurityCmd,
     },
 }
 
@@ -1054,6 +1882,85 @@ pub enum BackupCmd {
     Restore {
         /// Backup ID to restore (from `bosun backup list`)
         backup_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayCmd {
+    /// Show APISIX gateway status (version, uptime)
+    Status,
+    /// List all APISIX routes managed by bosun
+    Routes,
+    /// Enable a plugin on a route
+    Plugin {
+        /// App/route name
+        app: String,
+        /// Plugin name (e.g., rate-limit, jwt-auth, proxy-cache, cors)
+        plugin: String,
+        /// JSON config for the plugin (e.g., '{"count": 100, "time_window": 60}')
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage proxy-cache (enable, disable, stats, purge)
+    Cache {
+        #[command(subcommand)]
+        sub: CacheCmd,
+    },
+    /// Show Prometheus metrics from APISIX
+    Metrics,
+}
+
+#[derive(Subcommand)]
+pub enum CacheCmd {
+    /// Enable proxy-cache for an app
+    Enable {
+        /// App/route name
+        app: String,
+        /// Cache TTL in seconds
+        #[arg(long, default_value = "300")]
+        ttl: u64,
+    },
+    /// Disable proxy-cache for an app
+    Disable {
+        /// App/route name
+        app: String,
+    },
+    /// Show cache statistics for an app
+    Stats {
+        /// App/route name
+        app: String,
+    },
+    /// Purge (clear) the cache for an app
+    Purge {
+        /// App/route name
+        app: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecurityCmd {
+    /// Show IDS/IPS security engine status
+    Status,
+    /// List active decisions (banned IPs)
+    Decisions,
+    /// Run a basic security scan (ports, SSL, headers)
+    Scan {
+        /// App or domain to scan
+        app: String,
+        /// Target host (defaults to localhost)
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Generate a pentest HTML report
+    Report {
+        /// App or domain to generate report for
+        app: String,
+        /// Output file path (defaults to bosun-pentest-{app}.html)
+        #[arg(long)]
+        output: Option<String>,
+        /// Target host (defaults to localhost)
+        #[arg(long)]
+        host: Option<String>,
     },
 }
 
